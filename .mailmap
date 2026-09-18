@@ -1,0 +1,9 @@
+# .mailmap —— 把历史提交里的 Gitee 身份映射到 GitHub 账号
+#
+# 作用：不改写历史（不 force-push），只影响作者显示与贡献关联。
+# 格式：`正确名 <正确邮箱> <提交里的邮箱>` —— 邮箱映射形式，最稳。
+#
+# 注意：不要再加「名字+邮箱」四字段那种行（`A <a@x> B <b@y>`）。
+# 那种形式要求名字与邮箱**同时**匹配，提交里的名字一变就挡住匹配——
+# 本仓库第一次写就踩了这个坑：check-mailmap 认了，git log 却不认。
+AnoKodokushi <53988090+ano-kodokushi@users.noreply.github.com> <15945695+LFB4WE@user.noreply.gitee.com>
