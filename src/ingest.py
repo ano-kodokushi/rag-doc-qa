@@ -6,20 +6,23 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.chunking import Chunk, split_text
+from src.config import load_settings
 from src.embed import get_embedder
 from src.store import VectorStore
 
 if TYPE_CHECKING:  # 仅类型检查期
     from src.config import Settings
 
-__all__ = ["RawDoc", "read_raw_files", "run_ingest"]
+__all__ = ["RawDoc", "read_raw_files", "run_ingest", "build_parser", "main"]
 
 _TEXT_SUFFIXES = {".md", ".txt"}
 _PDF_SUFFIXES = {".pdf"}
@@ -132,3 +135,64 @@ def run_ingest(settings: "Settings", reset: bool = True) -> dict:
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
         "mocked": bool(settings.mock),
     }
+
+
+# ==================== CLI ====================
+
+_MAX_SOURCES_PRINTED = 10
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m src.ingest",
+        description="语料入库：读 data/raw → 切块 → 写 chunks.jsonl → embedding → 写向量库",
+    )
+    parser.add_argument(
+        "--reset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="入库前是否重建集合（默认开启；--no-reset 表示增量追加）",
+    )
+    parser.add_argument(
+        "--raw-dir",
+        default=None,
+        help="覆盖语料目录，默认取 settings.raw_dir（即 data/raw）",
+    )
+    return parser
+
+
+def _format_sources(sources: list[str]) -> str:
+    if len(sources) <= _MAX_SOURCES_PRINTED:
+        return ", ".join(sources)
+    head = ", ".join(sources[:_MAX_SOURCES_PRINTED])
+    return f"{head}, ...（共 {len(sources)} 个）"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    settings = load_settings()
+    if args.raw_dir:
+        settings = replace(settings, raw_dir=Path(args.raw_dir).resolve())
+
+    summary = run_ingest(settings, reset=args.reset)
+
+    print(
+        "[info] 入库完成 "
+        f"files={summary['files']} chunks={summary['chunks']} "
+        f"elapsed_ms={summary['elapsed_ms']} mocked={summary['mocked']}"
+    )
+    print(f"[info] raw_dir={settings.raw_dir}")
+    print(f"[info] sources: {_format_sources(summary['sources'])}")
+
+    if summary["chunks"] == 0:
+        print(
+            f"[error] {settings.raw_dir} 下没有可入库文档，请先放入 .md/.txt/.pdf",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

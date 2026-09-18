@@ -106,8 +106,14 @@ $P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
 $R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
 Set-Location $R
 
-# 3.1 把 data/raw/ 下的文档切块并写入向量库
+# 3.1 把 data/raw/ 下的文档切块并写入向量库（默认重建集合并打印 files/chunks/elapsed_ms/mocked/sources 汇总）
 & $P -m src.ingest
+
+# 可选参数：--no-reset 表示不重建集合、直接增量追加；--raw-dir 覆盖语料目录（默认 data/raw）
+& $P -m src.ingest --no-reset
+& $P -m src.ingest --raw-dir "data\raw"
+
+# 注意：语料为空（data/raw 下没有 .md/.txt/.pdf）时不会写库，会打印 [error] 并以退出码 1 结束
 
 # 3.2 起服务
 & $P -m uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -119,8 +125,19 @@ Set-Location $R
 Set-Location "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
 Copy-Item eval\questions.example.jsonl eval\questions.jsonl
 # 按 eval/README.md 的规范把 20 题写好，定稿后不要再改
-& $P -m eval.run_eval
+& $P -m eval.run_eval --mode mock --questions eval/questions.jsonl --out eval/report_mock.json
 ```
+
+评测参数说明：
+
+- `--mode`：三选一 `retrieval` / `full` / `mock`，必填。
+- `--questions`：题目 jsonl 路径，必填。
+- `--out`：汇总 JSON 输出路径，必填。
+- `--limit N`：只跑前 N 题（可选）。
+- `--top-k K`：覆盖检索返回条数（可选）。
+
+先跑 `mock`（不消耗额度、不需要 key）确认链路，再跑 `full` 出真实成绩；
+`--mode retrieval` / `--mode full` 都需要先在 `.env` 里配好有效的 API key。
 
 ## 运行顺序（重要）
 
