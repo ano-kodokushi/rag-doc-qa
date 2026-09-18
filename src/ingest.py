@@ -27,6 +27,15 @@ __all__ = ["RawDoc", "read_raw_files", "run_ingest", "build_parser", "main"]
 _TEXT_SUFFIXES = {".md", ".txt"}
 _PDF_SUFFIXES = {".pdf"}
 
+# 说明文件（文件名，小写比较）：README 是「语料怎么放」的格式说明书，供人阅读，
+# 不是知识本身。它被切块入库后，这类元信息会参与检索、挤占 top-k，稀释真实文档命中。
+_NON_CORPUS_FILENAMES = frozenset({"readme.md", "readme.txt"})
+
+
+def _is_non_corpus_file(path: Path) -> bool:
+    """判断是否为说明文件（按文件名、大小写不敏感），这类文件不入语料库。"""
+    return path.name.lower() in _NON_CORPUS_FILENAMES
+
 
 @dataclass
 class RawDoc:
@@ -51,7 +60,7 @@ def _read_pdf_file(path: Path) -> str:
 
 
 def read_raw_files(raw_dir: Path) -> list[RawDoc]:
-    """遍历 `raw_dir` 下 *.md / *.txt / *.pdf，抽不出文本的文件跳过并警告；按文件名排序。"""
+    """遍历 `raw_dir` 下 *.md / *.txt / *.pdf（跳过 README 等说明文件），抽不出文本的文件跳过并警告；按文件名排序。"""
     docs: list[RawDoc] = []
     directory = Path(raw_dir)
     if not directory.is_dir():
@@ -62,6 +71,7 @@ def read_raw_files(raw_dir: Path) -> list[RawDoc]:
         for path in directory.iterdir()
         if path.is_file()
         and path.suffix.lower() in (_TEXT_SUFFIXES | _PDF_SUFFIXES)
+        and not _is_non_corpus_file(path)  # 说明文件不是语料
     ]
     candidates.sort(key=lambda path: path.name)  # 确定性：按文件名排序
 

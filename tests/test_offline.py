@@ -1,4 +1,4 @@
-"""离线单测：只依赖标准库 + src.config / src.chunking / src.fusion / src.embed / eval.metrics。
+"""离线单测：只依赖标准库 + src.config / src.chunking / src.fusion / src.embed / src.ingest / eval.metrics。
 
 覆盖 SPEC.md 332-339 要求的 6 类契约。运行方式见 SPEC.md §6：
     & $P -m unittest discover -s "$R\\tests" -t $R -v
@@ -21,6 +21,7 @@ import src.config as config  # noqa: E402
 from src.chunking import Chunk, split_text  # noqa: E402
 from src.embed import MockEmbedder, get_embedder  # noqa: E402
 from src.fusion import dedupe_keep_order, rrf_fuse  # noqa: E402
+from src.ingest import read_raw_files  # noqa: E402
 
 from eval.metrics import (  # noqa: E402
     aggregate,
@@ -361,6 +362,35 @@ class ChunkRoundTripTests(unittest.TestCase):
             (Chunk.from_dict(empty_heading.to_dict()).text, Chunk.from_dict(empty_heading.to_dict()).heading),
             ("无标题段落", ""),
         )
+
+
+# ==================== 7. src.ingest.read_raw_files 语料过滤 ====================
+
+
+class ReadRawFilesTests(unittest.TestCase):
+    """README 是给人读的语料格式说明书，不是知识，不得被切块入库（PLAN T-012）。"""
+
+    def _make_raw_dir(self) -> Path:
+        return Path(tempfile.mkdtemp(prefix="rag_raw_"))
+
+    def test_readme_is_skipped_but_normal_corpus_is_read(self) -> None:
+        raw_dir = self._make_raw_dir()
+        (raw_dir / "README.md").write_text("# 语料格式说明\n\n请把 .md 放进本目录。\n", encoding="utf-8")
+        (raw_dir / "01_知识.md").write_text("# 真实知识\n\n这是应当被入库的正文段落。\n", encoding="utf-8")
+
+        docs = read_raw_files(raw_dir)
+
+        self.assertEqual([doc.source for doc in docs], ["01_知识.md"])
+        self.assertNotIn("README.md", [doc.source for doc in docs])
+
+    def test_readme_uppercase_extension_is_skipped_too(self) -> None:
+        raw_dir = self._make_raw_dir()
+        (raw_dir / "README.MD").write_text("# 语料格式说明\n\n请把 .md 放进本目录。\n", encoding="utf-8")
+        (raw_dir / "02_知识.md").write_text("# 真实知识\n\n这是应当被入库的正文段落。\n", encoding="utf-8")
+
+        docs = read_raw_files(raw_dir)
+
+        self.assertEqual([doc.source for doc in docs], ["02_知识.md"])
 
 
 if __name__ == "__main__":
