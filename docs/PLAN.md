@@ -77,6 +77,7 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 | ID | 任务 | 依赖 | 档位 | 状态 |
 |---|---|---|---|---|
 | T-012 | 排除 README 等说明文件被当作语料入库 | — | L1 / T1 | 待办 |
+| T-013 | 让离线单测对环境变量隔离（MOCK 泄漏导致假失败） | — | L1 / T1 | 待办 |
 
 **DAG**
 
@@ -610,6 +611,87 @@ Remove-Item "$R\data\chroma" -Recurse -Force -ErrorAction SilentlyContinue
 
 ---
 
+## T-013 · 让离线单测对环境变量隔离（MOCK 泄漏导致假失败）
+
+| | |
+|---|---|
+| **难度 / 档位** | L1 / T1 |
+| **依赖** | — |
+| **inScope** | `tests/test_offline.py` |
+| **outOfScope** | `SPEC.md`、`src/**`、`eval/**`、`docs/**` |
+
+**goal**：无论调用者的 shell 里有没有导出 `MOCK`（以及其它 `load_settings` 会读的环境变量），`& $P -m unittest discover` 都必须给出**同样**的结果。
+
+**发现过程（T-008 收尾时暴露）**：在同一个 shell 里先 `$env:MOCK='1'`（这正是 `README.md` 快速开始第 1 步教的命令），再跑 `AGENTS.md §6` 第二条命令 → `Ran 23 tests … FAILED (failures=1)`；把该变量清掉再跑 → `OK`。
+
+**最小复现**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+Set-Location $R
+
+$env:MOCK = '1'
+& $P -m unittest discover -s "$R\tests" -t $R        # 实际：FAILED (failures=1)
+Remove-Item Env:MOCK
+& $P -m unittest discover -s "$R\tests" -t $R        # 实际：OK
+```
+
+失败点：`tests/test_offline.py:299`
+`self.assertIs(config.load_settings(env_file=env_file).mock, expected, raw)`
+→ `AssertionError: True is not False : 0`
+
+**为什么是实现对、测试错**：`SPEC.md §5` 明确「环境变量优先级高于 `.env` 文件」。该用例往临时 `.env` 里写了 `MOCK=0` 并期望 `settings.mock is False`，但调用者 shell 里的 `MOCK=1` 按契约**本就该覆盖它** —— 所以 `load_settings` 的行为是正确的，**是用例没有隔离进程环境**。用户照 `README.md` 第 1 步导出了 `MOCK=1` 之后在同一 shell 跑测试，就会看到假失败。
+
+**修复方向（实现者自主，但必须满足验收）**：让用例不依赖调用者的环境 —— 可用 `unittest.mock.patch.dict(os.environ, ...)` 在用例内（或 `setUp`/`tearDown`）把 `load_settings` 会读的键临时移除或固定。
+**不得**放宽容宽（例如把 `assertIs` 改成 `assertIn`）、**不得** `skip` 用例、**不得**改 `src/config.py` 去迁就测试。
+
+**验收命令**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+Set-Location $R
+
+# 1) 泄漏环境下必须也全绿（当前实测 FAILED —— 这就是本卡要修的）
+$env:MOCK = '1'
+& $P -m unittest discover -s "$R\tests" -t $R -v
+"leaked exit=$LASTEXITCODE"
+Remove-Item Env:MOCK
+
+# 2) 干净环境下仍全绿，且用例数不得减少
+& $P -m unittest discover -s "$R\tests" -t $R -v
+"clean exit=$LASTEXITCODE"
+
+# 3) 再排一个同样会泄漏的键复测
+$env:CHUNK_SIZE = '123'
+& $P -m unittest discover -s "$R\tests" -t $R
+"chunk exit=$LASTEXITCODE"
+Remove-Item Env:CHUNK_SIZE
+
+& $P -m compileall -q $R
+```
+
+**通过标准**
+- 第 1 条：`OK`，退出码 0
+- 第 2 条：`OK`，退出码 0，用例数 **≥ 改动前的 23**（不得靠删用例或 `skip` 变绿）
+- 第 3 条：退出码 0
+- 不得修改 `src/**` 与 `SPEC.md`
+
+**结论模板**
+
+```
+任务：T-013 单测环境隔离
+改动文件：tests/test_offline.py
+验收结果：
+  [x] MOCK=1 下全绿 —— 原始输出：<粘贴>
+  [x] 干净环境下全绿且用例数 = N —— 原始输出：<粘贴>
+  [x] CHUNK_SIZE=123 下全绿 —— 原始输出：<粘贴>
+遗留问题：<无 / 具体描述>
+```
+
+---
+
 ## 3. 单卡执行循环
 
 ```
@@ -649,3 +731,4 @@ Remove-Item "$R\data\chroma" -Recurse -Force -ErrorAction SilentlyContinue
 | 2026-09-18 | 把 `MOCK=1` 全链路验收定为**核心卡 T-007** | 这是唯一不需要 API key 就能证明项目可跑的路径；先证明能跑，再花钱 |
 | 2026-09-18 | 新增 T-011（治理链修复），并把 `$K` 写进 §0.2 | 用户确认：`TASK_BRIEF.md` 空模板必须补；实测 `push-task.mjs` 相对路径跑不通；DoD 与 T-004 的 outOfScope 直接冲突 |
 | 2026-09-18 | 新增 T-012（README 被当语料入库的缺陷修复） | T-007 核心卡实测 `files=13` 而非 12：`data/raw/README.md` 被切块入库，会让「怎么放语料」这类元信息参与检索、稀释真实文档命中 |
+| 2026-09-18 | 新增 T-013（离线单测未隔离环境变量） | T-008 收尾时在 `MOCK=1` 的 shell 里跑 AGENTS §6 第二条命令得到 `FAILED (failures=1)`，未设该变量时 `OK`；`SPEC.md §5` 规定环境变量优先于 `.env`，**实现是对的、用例没隔离环境**。而 `README.md` 第 1 步恰好教用户 `$env:MOCK = "1"`，照做再跑测试就会看到假失败 |
