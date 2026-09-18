@@ -131,18 +131,25 @@ def chat(payload: ChatRequest) -> dict:
     if not isinstance(question, str) or not question.strip():
         raise HTTPException(status_code=400, detail="question 不能为空")
 
+    # 计时覆盖本次请求真正花掉的全部时间：lazy 构建 + 检索 + 生成。
+    # 冷启动取舍：`retriever` / `generator` 的首次构建（建索引 / 加载 BM25 / 载入语料）
+    # 是一次性成本，这里**故意不去预热、也不剔除它**——请求里真实发生了这笔开销，
+    # 从接口口径里抹掉就是名不符实；`/health` 的数量与返回结构均不变。
+    # 代价是**首次 /chat 会偏大**（并把这份冷启动成本显式暴露给客户端），
+    # 第 2 次起为稳态值，客户端可用「第一次 / 后续」的对比读出击穿/预热状态。
+    started = time.perf_counter()
+
     # 首次调用时才构建 Retriever / Generator（lazy），之后复用缓存。
     retriever = get_retriever()
     generator = get_cached_generator()
 
-    started = time.perf_counter()
     hits: list[Hit] = retriever.search(question, top_k=payload.top_k)
     answer = generator.answer(question, hits)
 
     # 检索为空时 answer.text 由 Generator / MockGenerator 给出拒答文案，这里不做特判、不报错。
-    latency_ms = int(answer.latency_ms) if answer.latency_ms is not None else int(
-        (time.perf_counter() - started) * 1000
-    )
+    # 注意：`answer.latency_ms` 只覆盖生成段（由 Generator / MockGenerator 各自测量），
+    # 不再采用它——否则检索段会被丢掉（mock 模式下生成瞬时，接口曾报 0）。
+    latency_ms = int((time.perf_counter() - started) * 1000)
 
     return {
         "answer": answer.text,
