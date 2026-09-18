@@ -1,22 +1,29 @@
+# 直接依赖清单（版本已按 2026-09-18 实测结果 pin 死，便于 clone 后复现）
+# 口径说明（治理书 §5「lock 文件必须一并提交」）：
+#   - 只 pin 直接依赖，不锁全量传递依赖（避免把 onnxruntime 等大件一起钉死）
+#   - 升级版本时必须同步改本文件，并重跑 AGENTS.md §6 的两条验收命令
+# 解释器：C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe（3.12.0）
+#         ⚠️ 禁止使用机器上的 Anaconda Python 3.7
+
 # Web 服务
-fastapi
-uvicorn[standard]
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
 
 # LLM / Embedding（OpenAI 兼容 SDK）
-openai
+openai==3.15.0
 
 # 向量库
-chromadb
+chromadb==1.5.9
 
 # 文档解析
-pypdf
+pypdf==6.19.0
 
 # 检索
-rank_bm25
-jieba
+rank_bm25==0.2.2
+jieba==0.42.1
 
 # 配置
-python-dotenv
+python-dotenv==1.2.3
 
 # 网络请求（Rerank，二期可选）
-requests
+requests==2.34.2
