@@ -27,22 +27,53 @@ class Retriever:
         self.settings = settings
         self.embedder = get_embedder(settings)
         self.store = VectorStore(settings)
+        # 进程内缓存（惰性构建、实例级）：chunks_file 读盘 + BM25 索引 + id→Chunk 映射
+        # 都只做一次，避免每次 search 重建索引（原为检索耗时的大头）。
+        self._keyword_index: KeywordIndex | None = None
+        self._chunk_map_cache: dict[str, Chunk] | None = None
+
+    # ── 缓存失效 ───────────────────────────────────────────────────────────
+
+    def clear_cache(self) -> None:
+        """丢弃进程内缓存的 BM25 索引与 chunk 映射，下次使用时惰性重建。
+
+        ⚠️ 本缓存是**进程内**的，以 `settings.chunks_file` 的构建时刻为准：
+        只要语料发生变更（重新 ingest、chunks.jsonl 被改写），**必须**调用本方法
+        失效，否则会继续用旧索引作答。`app/main.py` 的 `/ingest` 已通过
+        `get_retriever.cache_clear()` 丢弃整个 Retriever，因此走 HTTP 路径时
+        无需额外调用。
+        """
+        self._keyword_index = None
+        self._chunk_map_cache = None
 
     # ── 内部工具 ───────────────────────────────────────────────────────────
 
+    def _keyword_index_cached(self) -> KeywordIndex:
+        """取缓存的 BM25 索引；首次调用时从 chunks_file 构建。"""
+        if self._keyword_index is None:
+            self._keyword_index = KeywordIndex.from_chunks_file(
+                self.settings.chunks_file
+            )
+        return self._keyword_index
+
     def _chunk_map(self) -> dict[str, Chunk]:
-        """以 `VectorStore.all_chunks()`（读 chunks_file）为权威来源建 id → Chunk 映射。"""
-        mapping: dict[str, Chunk] = {}
-        for chunk in self.store.all_chunks():
-            mapping[chunk.id] = chunk
-        return mapping
+        """以 `VectorStore.all_chunks()`（读 chunks_file）为权威来源建 id → Chunk 映射。
+
+        结果缓存在实例上；语料变更后需 `clear_cache()` 失效。
+        """
+        if self._chunk_map_cache is None:
+            mapping: dict[str, Chunk] = {}
+            for chunk in self.store.all_chunks():
+                mapping[chunk.id] = chunk
+            self._chunk_map_cache = mapping
+        return self._chunk_map_cache
 
     def _rankings(self, question: str) -> dict[str, list[str]]:
         """两路召回的 id 排名（rank 从 1 开始，交给 rrf_fuse 计分）。"""
         vector_hits = self.store.query(
             self.embedder.embed_query(question), self.settings.top_k_vec
         )
-        keyword_index = KeywordIndex.from_chunks_file(self.settings.chunks_file)
+        keyword_index = self._keyword_index_cached()
         bm25_hits = keyword_index.search(question, self.settings.top_k_bm25)
         return {
             "vector": [hit.chunk_id for hit in vector_hits],
