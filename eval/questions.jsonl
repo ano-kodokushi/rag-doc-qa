@@ -1,0 +1,20 @@
+{"id":"q01","type":"single_hop","question":"【占位·单跳 01】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词01-A","占位关键词01-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q02","type":"single_hop","question":"【占位·单跳 02】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词02-A","占位关键词02-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q03","type":"single_hop","question":"【占位·单跳 03】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词03-A","占位关键词03-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q04","type":"single_hop","question":"【占位·单跳 04】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词04-A","占位关键词04-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q05","type":"single_hop","question":"【占位·单跳 05】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词05-A","占位关键词05-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q06","type":"single_hop","question":"【占位·单跳 06】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词06-A","占位关键词06-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q07","type":"single_hop","question":"【占位·单跳 07】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词07-A","占位关键词07-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q08","type":"single_hop","question":"【占位·单跳 08】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词08-A","占位关键词08-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q09","type":"single_hop","question":"【占位·单跳 09】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词09-A","占位关键词09-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q10","type":"single_hop","question":"【占位·单跳 10】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词10-A","占位关键词10-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q11","type":"single_hop","question":"【占位·单跳 11】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词11-A","占位关键词11-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q12","type":"single_hop","question":"【占位·单跳 12】待 T-008 替换为基于真实语料的单跳事实题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词12-A","占位关键词12-B"],"gold_sources":["占位文档-待T-008替换.md"],"must_refuse":false}
+{"id":"q13","type":"multi_hop","question":"【占位·多跳 13】待 T-008 替换为需跨章节综合的多跳题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词13-A","占位关键词13-B"],"gold_sources":["占位文档A-待T-008替换.md","占位文档B-待T-008替换.md"],"must_refuse":false}
+{"id":"q14","type":"multi_hop","question":"【占位·多跳 14】待 T-008 替换为需跨章节综合的多跳题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词14-A","占位关键词14-B"],"gold_sources":["占位文档A-待T-008替换.md","占位文档B-待T-008替换.md"],"must_refuse":false}
+{"id":"q15","type":"multi_hop","question":"【占位·多跳 15】待 T-008 替换为需跨章节综合的多跳题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词15-A","占位关键词15-B"],"gold_sources":["占位文档A-待T-008替换.md","占位文档B-待T-008替换.md"],"must_refuse":false}
+{"id":"q16","type":"multi_hop","question":"【占位·多跳 16】待 T-008 替换为需跨章节综合的多跳题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词16-A","占位关键词16-B"],"gold_sources":["占位文档A-待T-008替换.md","占位文档B-待T-008替换.md"],"must_refuse":false}
+{"id":"q17","type":"multi_hop","question":"【占位·多跳 17】待 T-008 替换为需跨章节综合的多跳题","gold":"【占位】待 T-008 填写标准答案","keypoints":["占位关键词17-A","占位关键词17-B"],"gold_sources":["占位文档A-待T-008替换.md","占位文档B-待T-008替换.md"],"must_refuse":false}
+{"id":"q18","type":"unanswerable","question":"【占位·不可答 18】待 T-008 替换为语料中不存在答案的问题","gold":"根据现有资料无法回答","keypoints":[],"gold_sources":[],"must_refuse":true}
+{"id":"q19","type":"unanswerable","question":"【占位·不可答 19】待 T-008 替换为语料中不存在答案的问题","gold":"根据现有资料无法回答","keypoints":[],"gold_sources":[],"must_refuse":true}
+{"id":"q20","type":"unanswerable","question":"【占位·不可答 20】待 T-008 替换为语料中不存在答案的问题","gold":"根据现有资料无法回答","keypoints":[],"gold_sources":[],"must_refuse":true}
