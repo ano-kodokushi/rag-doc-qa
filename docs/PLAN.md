@@ -64,10 +64,12 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 |---|---|---|---|---|
 | T-008 | 按真实语料出 20 题正式题库 | T-006 | T1 | **完成** |
 | T-009 | 真实模式 20 题评测，产出报告 | T-007, T-008 | T1 | **完成**（2026-09-18） |
-| T-010 | 文档与交接收口 | T-009 | T2 | 待办 |
+| T-010 | 文档与交接收口 | T-009 | T2 | **完成**（2026-09-18） |
 
-> **M2 已拿到真实数字**：`eval/report.json` = `{n:20, accuracy:0.45, partial_rate:0.35, wrong_rate:0.20, refusal_accuracy:1.00, hit_rate:0.80, avg_latency_ms:1644.8}`。
-> **引用时务必注明"单次运行"** —— 同参数连跑两次 `accuracy` 实测在 0.45–0.50 之间波动（见 §5.5）。
+> **M2 已拿到真实数字**（**最终语料**：12 份 / 400 块，`eval/report.json`）：
+> `{n:20, accuracy:0.45, partial_rate:0.30, wrong_rate:0.25, refusal_accuracy:1.00, hit_rate:0.80, avg_latency_ms:1654.6}`
+> **引用时务必注明"单次运行"** —— 同参数连跑，`accuracy` 实测落在 0.45–0.50（见 §5.5）。
+> 该数字已按最终语料**刷新过一次**：T-012 去掉 `README.md` 噪声前后各测一遍作对照（见 §5.9）。
 
 ## 2.5 里程碑 M3 · 治理链修复（可与其他卡并行）
 
@@ -79,8 +81,9 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 
 | ID | 任务 | 依赖 | 档位 | 状态 |
 |---|---|---|---|---|
-| T-012 | 排除 README 等说明文件被当作语料入库 | — | L1 / T1 | 待办 |
-| T-013 | 让离线单测对环境变量隔离（MOCK 泄漏导致假失败） | — | L1 / T1 | 待办 |
+| T-012 | 排除 README 等说明文件被当作语料入库 | — | L1 / T1 | **完成** |
+| T-013 | 让离线单测对环境变量隔离（MOCK 泄漏导致假失败） | — | L1 / T1 | **完成** |
+| T-014 | `/chat` 的 `latency_ms` 只覆盖生成段，不含检索与冷启动 | — | L1 / T1 | 待办 |
 
 **DAG**
 
@@ -695,6 +698,73 @@ Remove-Item Env:CHUNK_SIZE
 
 ---
 
+## T-014 · `/chat` 的 `latency_ms` 应覆盖整个请求
+
+| | |
+|---|---|
+| **难度 / 档位** | L1 / T1 |
+| **依赖** | — |
+| **inScope** | `app/main.py`（如需补测试，可加 `tests/test_offline.py`） |
+| **outOfScope** | `SPEC.md`、`src/**`、`eval/**`、`docs/**` |
+
+**goal**：`POST /chat` 返回的 `latency_ms` 反映**这次请求真正花了多久**（检索 + 生成），而不是只反映生成那一段。
+
+**发现过程（T-010 交接收口轮，首次真正起服务时暴露）**
+
+| 模式 | 接口报的 `latency_ms` | 客户端实测 |
+|---|---|---|
+| `MOCK=1` | **0** | 约 460 ms |
+| `MOCK=0` | **1251** | **8217 ms** |
+
+**根因**：`app/main.py` 优先返回 `answer.latency_ms`（生成段计时）；而 `Answer.latency_ms` 由 `Generator` / `MockGenerator` 各自测量，**都不包含检索**。
+真实模式下检索含一次 query embedding 的 API 调用（约几百 ms）+ chroma 查询 + BM25（jieba 分词），mock 模式下检索仍是真跑，所以 **mock 反而把它暴露成 0**。
+
+**最小复现**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+Set-Location $R
+$env:MOCK = "1"
+Start-Process -NoNewWindow $P -ArgumentList "-m","uvicorn","app.main:app","--host","127.0.0.1","--port","8000"
+# 另开一个终端（连打两次，第二次避开冷启动）：
+& $P -c "import json,time,urllib.request
+for i in range(2):
+    t0=time.perf_counter()
+    req=urllib.request.Request('http://127.0.0.1:8000/chat',data=json.dumps({'question':'Vue 3 里 ref 怎么读值'}).encode(),headers={'Content-Type':'application/json'},method='POST')
+    d=json.loads(urllib.request.urlopen(req,timeout=60).read())
+    print('接口 latency_ms =',d['latency_ms'],' 客户端实测 =',round((time.perf_counter()-t0)*1000,1),'ms')"
+# 实际输出：接口 latency_ms = 0   客户端实测 = ~460ms（两次都是）
+```
+
+**修复方向（实现者自主）**：在请求处理入口开始计时，覆盖检索 + 生成，直接返回该总耗时。
+是否要把冷启动（首次构建 Retriever / BM25 索引）排除（例如启动时预热），由实现者判断，但**必须在代码注释里写明取舍**。
+
+**验收命令**（mock 模式即可，免费；起服务后连打两次，取第二次避开冷启动）
+
+```powershell
+& $P -m compileall -q $R
+& $P -m unittest discover -s "$R\tests" -t $R
+```
+
+**通过标准**
+- mock 模式第二次 `POST /chat` 的接口 `latency_ms` **> 0**，且 **≥ 客户端实测 × 0.8**
+- `compileall` 退出码 0；单测 `OK`，**用例数不得减少**（当前 25）
+- 不得修改 `src/**` 与 `SPEC.md`；不得为了凑数字把接口延迟写死成常数
+
+**结论模板**
+
+```
+任务：T-014 修正 /chat 延迟口径
+改动文件：app/main.py（+ 测试，若有）
+验收结果：
+  [x] mock 第二次请求：接口 latency_ms = ?，客户端实测 = ?，比值 = ? —— 原始输出：<粘贴>
+  [x] compileall / 单测 —— 实际：exit 0 / Ran N tests, OK
+遗留问题：<冷启动是否已处理 / 无>
+```
+
+---
+
 ## 3. 单卡执行循环
 
 ```
@@ -725,13 +795,19 @@ Remove-Item Env:CHUNK_SIZE
 2. **`MOCK` 模式仍需要 `chromadb`**（`SPEC.md §5` 明确）—— 所以 T-004 是 T-007 的硬前置。
 3. **真实评测会产生 API 费用**（Embedding + 生成），T-009 执行前需用户确认。
 4. **本计划的验收数字均为"当轮实测"**：语料/题库一变，数字就变，不可跨轮直接比较。
-5. **真实评测的数字有运行间波动**：同输入、`temperature=0`、同一天连跑两次，`accuracy` 实测 **0.45 → 0.50**、`partial_rate` **0.35 → 0.30**；`wrong_rate` / `refusal_accuracy` / `hit_rate` 稳定在 **0.20 / 1.00 / 0.80**。
+5. **真实评测的数字有运行间波动**：同输入、`temperature=0` 连跑，`accuracy` 实测落在 **0.45–0.50**（旧语料 0.45 / 0.50，最终语料 0.45）；`partial_rate` 在 **0.30–0.35**、`wrong_rate` 在 **0.20–0.25** 之间同步移动；而 `refusal_accuracy` / `hit_rate` 三次运行**全部稳定在 1.00 / 0.80**。
    原因是 `correct` 与 `partial` 的边界取决于模型输出措辞（`keypoints` 覆盖率是否 ≥ 0.8），模型即使温度为 0 也不是逐字确定的。
    **引用时必须注明"单次运行"，或写成区间（如 accuracy 45%–50%）**；不要把波动误读成"改了东西导致退化"。
-6. **`multi_hop` 是当前最弱项**：分类实测 `multi_hop` accuracy **0.20**（5 题：1 完全对 / 3 部分对 / 1 错，检索命中 5/5）、`single_hop` **0.50**（12 题：6/3/3，检索命中 11/12）、`unanswerable` **1.00**（3 题全部正确拒答）。
+6. **`multi_hop` 是当前最弱项**：最终语料上分类实测 `multi_hop` accuracy **0.20**（5 题：1 完全对 / 3 部分对 / 1 错，**检索命中 5/5**）、`single_hop` **0.42**（12 题：5/3/4，检索命中 11/12）、`unanswerable` **1.00**（3 题全部正确拒答）。
    疑似原因：多跳题需要跨两篇文档综合，而检索是 `top_k_final=4` 的单块拼接，跨文档的另一半依据容易被挤掉；且多跳题的 `keypoints` 更多，更容易落在"部分对"。**属现状而非缺陷**；多路召回 / 父子分块 / query 改写属 `SPEC.md` 非目标清单，留二期。
-7. **`data/raw/README.md` 的噪声已被实测确认**：3 道拒答题虽全部正确拒答（`refusal_accuracy=1.00`），但模型回答里出现了「资料里提到了……数据库设计……的文档」—— 它读到了 `README.md` 里那份"建议语料清单"的**文件名**。不影响拒答正确性，但印证了 `T-012` 的必要性（该说明文件不该入库）。
-8. **生成侧存在"过度保守"**：`q12`（可答题，检索 `hit=True`）被模型回答成「根据现有资料无法回答」。属生成行为而非检索缺陷，暂不单独开卡，记录备查。
+7. **`data/raw/README.md` 的噪声曾被实测确认，现已由 T-012 修复**：T-009 首次评测时（该文件仍入库），3 道拒答题虽全部正确拒答，但模型回答里出现了「资料里提到了……数据库设计……的文档」—— 它读到了 `README.md` 里那份"建议语料清单"的**文件名**。T-012 已把说明文件排除出语料（`files` 13 → 12，`chunks` 405 → 400）。
+8. **生成侧存在偶发"过度保守"**：`q12`（可答题，检索 `hit=True`）在两次运行中一次被答成「根据现有资料无法回答」、一次正常作答。属生成行为而非检索缺陷，且本身也是运行间波动的一部分，记录备查、暂不开卡。
+9. **T-012 去掉噪声的效果在 20 题分辨率下测不出来**（对照实验）：同一套题分别在「含 README（13 份 / 405 块）」与「不含（12 份 / 400 块）」两种语料上各跑一次 ——
+   `accuracy` **0.45 → 0.45**、`hit_rate` **0.80 → 0.80** 完全不变；仅 `partial_rate 0.35 → 0.30`、`wrong_rate 0.20 → 0.25`（一题从"部分对"落到"错"），幅度落在 §5.5 的波动范围内。
+   **结论：T-012 的价值在于索引干净与语义正确，而不是分数提升**；做这个对照的意义正是**避免把噪声当成"分数变好了"**。
+10. **`/chat` 的 `latency_ms` 名不符实（已开卡 T-014）**：`app/main.py` 优先采用 `Answer.latency_ms`，而它只覆盖生成段。实测：真实模式接口报 **1251 ms** / 客户端 **8217 ms**；mock 模式接口报 **0 ms** / 客户端约 **460 ms**。
+    评测报告里的 `avg_latency_ms` 由 `eval/run_eval.py` 独立计时（覆盖检索 + 生成），**不受此缺陷影响**。
+11. **「环境变量优先于 `.env`」这条契约没有落盘测试**：`tests/test_offline.py` 未覆盖 `SPEC.md §5` 的这条优先级规则（T-004 时只有临时断言验过，未提交）。属既有覆盖缺口、非 T-013 引入；如需补测请另开卡，不要顺手改 T-013 的卡面。
 
 ## 6. 变更记录
 
@@ -743,3 +819,5 @@ Remove-Item Env:CHUNK_SIZE
 | 2026-09-18 | 新增 T-012（README 被当语料入库的缺陷修复） | T-007 核心卡实测 `files=13` 而非 12：`data/raw/README.md` 被切块入库，会让「怎么放语料」这类元信息参与检索、稀释真实文档命中 |
 | 2026-09-18 | 新增 T-013（离线单测未隔离环境变量） | T-008 收尾时在 `MOCK=1` 的 shell 里跑 AGENTS §6 第二条命令得到 `FAILED (failures=1)`，未设该变量时 `OK`；`SPEC.md §5` 规定环境变量优先于 `.env`，**实现是对的、用例没隔离环境**。而 `README.md` 第 1 步恰好教用户 `$env:MOCK = "1"`，照做再跑测试就会看到假失败 |
 | 2026-09-18 | T-009 产出首个真实数字；把「运行间波动」「multi_hop 最弱」「README 噪声被引用」「生成侧过度保守」四条写进 §5 已知限制 | 同参数连跑两次 `accuracy` 0.45 vs 0.50 —— 不写清楚，后续会把正常波动当成"改坏了"；分类数据显示多跳题是短板，必须在报告与简历里如实标注，而不是只报 0.45 这个好看的总数 |
+| 2026-09-18 | T-012 / T-013 关闭；新增 T-014（`/chat` 延迟口径） | T-012 去掉了入库噪声（13→12 份），T-013 消除了 `MOCK` 泄漏导致的单测假失败；T-014 是 T-010 首次真正起服务时暴露的：接口报的 `latency_ms` 不含检索（mock 下报 0、真实下报 1251 而客户端实测 8217） |
+| 2026-09-18 | T-009 的数字按**最终语料**刷新一次，并把「去噪声前后对照」结论写进 §5.9 | 语料从 13 份 405 块变成 12 份 400 块，原数字对应一个已不存在的语料状态；对照结果显示 `accuracy`/`hit_rate` 未变，只有落在波动范围内的一题差异 —— 如实记录「测不出来」，避免把噪声当成分数提升 |
