@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Iterator
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TESTS_DIR.parent
@@ -33,6 +36,29 @@ from eval.metrics import (  # noqa: E402
 
 # 全角与半角标点样本（SPEC 304 列出的字符集合）
 FULLWIDTH_PUNCT = "，。、；：？！,.;:?!()（）[]【】\"'`"
+
+#: load_settings 会读取的环境变量名：由 Settings 字段自动推导，避免加配置项后漏隔离
+SETTINGS_ENV_KEYS: tuple[str, ...] = tuple(f.name.upper() for f in dataclasses.fields(config.Settings))
+
+
+@contextlib.contextmanager
+def isolate_settings_env() -> Iterator[None]:
+    """临时移除调用者环境里全部 Settings 相关变量，退出时原样还原。
+
+    必须真删键而不是置空串：`load_settings` 会把 `os.environ` 的每一项都当作
+    覆盖值，置空串同样会盖掉 `.env`（空串不是"未设置"）。
+
+    SPEC §5 规定环境变量优先级高于 `.env`，所以「想在 `.env` 里造数据」的用例
+    必须先挡住调用者 shell 里残留的 `MOCK` / `CHUNK_SIZE` 等键，否则会看到假失败
+    （PLAN T-013：README 快速开始第 1 步就教用户 `$env:MOCK = "1"`）。
+    """
+    saved: dict[str, str] = {key: os.environ[key] for key in SETTINGS_ENV_KEYS if key in os.environ}
+    for key in saved:
+        del os.environ[key]
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -242,6 +268,19 @@ class MetricsNormalizeTests(unittest.TestCase):
 
 
 class LoadSettingsTests(unittest.TestCase):
+    """SPEC §5：环境变量优先级高于 .env，所以本类必须自己隔离进程环境。
+
+    否则调用者 shell 里残留的 MOCK / CHUNK_SIZE（例如 README 快速开始第 1 步
+    教的 `$env:MOCK = "1"`）会按契约覆盖 .env，让断言看到假失败（PLAN T-013）。
+    """
+
+    #: load_settings 会读取的环境变量名：由 Settings 字段自动推导，避免漏项
+    ENV_KEYS: tuple[str, ...] = SETTINGS_ENV_KEYS
+
+    def _isolated_env(self) -> Iterator[None]:
+        """临时移除调用者环境里全部 Settings 相关变量，退出时原样还原。"""
+        return isolate_settings_env()
+
     def _write_env(self, content: str) -> Path:
         tmp_dir = Path(tempfile.mkdtemp(prefix="rag_env_"))
         env_file = tmp_dir / "test.env"
@@ -249,61 +288,64 @@ class LoadSettingsTests(unittest.TestCase):
         return env_file
 
     def test_env_file_overrides_defaults_with_int_and_bool(self) -> None:
-        env_file = self._write_env(
-            "\n".join(
-                [
-                    "# 注释行",
-                    "",
-                    "LLM_MODEL=offline-test-model",
-                    "EMBED_DIM=48",
-                    "EMBED_BATCH=3",
-                    "CHUNK_SIZE=123",
-                    "CHUNK_OVERLAP=7",
-                    "MOCK=1",
-                    "RERANK_ENABLED=no",
-                    "COLLECTION=offline_doc_qa",
-                ]
+        with self._isolated_env():
+            env_file = self._write_env(
+                "\n".join(
+                    [
+                        "# 注释行",
+                        "",
+                        "LLM_MODEL=offline-test-model",
+                        "EMBED_DIM=48",
+                        "EMBED_BATCH=3",
+                        "CHUNK_SIZE=123",
+                        "CHUNK_OVERLAP=7",
+                        "MOCK=1",
+                        "RERANK_ENABLED=no",
+                        "COLLECTION=offline_doc_qa",
+                    ]
+                )
+                + "\n"
             )
-            + "\n"
-        )
-        settings = config.load_settings(env_file=env_file)
+            settings = config.load_settings(env_file=env_file)
 
-        self.assertEqual(settings.llm_model, "offline-test-model")
-        self.assertEqual(settings.collection, "offline_doc_qa")
-        self.assertIsInstance(settings.embed_dim, int)
-        self.assertEqual(settings.embed_dim, 48)
-        self.assertEqual(settings.embed_batch, 3)
-        self.assertEqual(settings.chunk_size, 123)
-        self.assertEqual(settings.chunk_overlap, 7)
-        self.assertIs(settings.mock, True)
-        self.assertIs(settings.rerank_enabled, False)
-        # 未在 .env 中声明的 key 使用默认兜底值
-        self.assertEqual(settings.top_k_final, 4)
+            self.assertEqual(settings.llm_model, "offline-test-model")
+            self.assertEqual(settings.collection, "offline_doc_qa")
+            self.assertIsInstance(settings.embed_dim, int)
+            self.assertEqual(settings.embed_dim, 48)
+            self.assertEqual(settings.embed_batch, 3)
+            self.assertEqual(settings.chunk_size, 123)
+            self.assertEqual(settings.chunk_overlap, 7)
+            self.assertIs(settings.mock, True)
+            self.assertIs(settings.rerank_enabled, False)
+            # 未在 .env 中声明的 key 使用默认兜底值
+            self.assertEqual(settings.top_k_final, 4)
 
     def test_relative_paths_resolve_to_absolute_under_project_root(self) -> None:
-        env_file = self._write_env(
-            "CHROMA_DIR=data/chroma_offline\nRAW_DIR=data/raw_offline\nCHUNKS_FILE=data/chunks_offline.jsonl\n"
-        )
-        settings = config.load_settings(env_file=env_file)
+        with self._isolated_env():
+            env_file = self._write_env(
+                "CHROMA_DIR=data/chroma_offline\nRAW_DIR=data/raw_offline\nCHUNKS_FILE=data/chunks_offline.jsonl\n"
+            )
+            settings = config.load_settings(env_file=env_file)
 
-        expected_chroma = (config.PROJECT_ROOT / "data/chroma_offline").resolve()
-        self.assertTrue(settings.chroma_dir.is_absolute())
-        self.assertEqual(settings.chroma_dir, expected_chroma)
-        self.assertTrue(settings.raw_dir.is_absolute())
-        self.assertTrue(settings.chunks_file.is_absolute())
-        self.assertEqual(settings.raw_dir, (config.PROJECT_ROOT / "data/raw_offline").resolve())
-        self.assertEqual(settings.chunks_file, (config.PROJECT_ROOT / "data/chunks_offline.jsonl").resolve())
+            expected_chroma = (config.PROJECT_ROOT / "data/chroma_offline").resolve()
+            self.assertTrue(settings.chroma_dir.is_absolute())
+            self.assertEqual(settings.chroma_dir, expected_chroma)
+            self.assertTrue(settings.raw_dir.is_absolute())
+            self.assertTrue(settings.chunks_file.is_absolute())
+            self.assertEqual(settings.raw_dir, (config.PROJECT_ROOT / "data/raw_offline").resolve())
+            self.assertEqual(settings.chunks_file, (config.PROJECT_ROOT / "data/chunks_offline.jsonl").resolve())
 
     def test_bool_variants_and_missing_env_file_do_not_raise(self) -> None:
-        for raw, expected in [("on", True), ("YES", True), ("True", True), ("0", False), ("maybe", False)]:
-            env_file = self._write_env(f"MOCK={raw}\n")
-            self.assertIs(config.load_settings(env_file=env_file).mock, expected, raw)
+        with self._isolated_env():
+            for raw, expected in [("on", True), ("YES", True), ("True", True), ("0", False), ("maybe", False)]:
+                env_file = self._write_env(f"MOCK={raw}\n")
+                self.assertIs(config.load_settings(env_file=env_file).mock, expected, raw)
 
-        missing = Path(tempfile.mkdtemp(prefix="rag_env_missing_")) / "nope.env"
-        settings = config.load_settings(env_file=missing)
-        self.assertIsInstance(settings, config.Settings)
-        self.assertIsInstance(settings.embed_dim, int)
-        self.assertTrue(settings.chunks_file.is_absolute())
+            missing = Path(tempfile.mkdtemp(prefix="rag_env_missing_")) / "nope.env"
+            settings = config.load_settings(env_file=missing)
+            self.assertIsInstance(settings, config.Settings)
+            self.assertIsInstance(settings.embed_dim, int)
+            self.assertTrue(settings.chunks_file.is_absolute())
 
 
 # ==================== 5. src.embed.MockEmbedder ====================
@@ -311,6 +353,10 @@ class LoadSettingsTests(unittest.TestCase):
 
 class MockEmbedderTests(unittest.TestCase):
     def setUp(self) -> None:
+        # 维度等配置同样来自 load_settings，必须与调用者环境隔离（PLAN T-013）
+        isolated = isolate_settings_env()
+        isolated.__enter__()
+        self.addCleanup(isolated.__exit__, None, None, None)
         self.settings = config.load_settings()
         self.embedder = MockEmbedder(self.settings)
 
