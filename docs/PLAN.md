@@ -33,12 +33,14 @@
 ```powershell
 $P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"   # 唯一允许的解释器
 $R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+$K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-task.mjs"   # 治理套件脚本，不在仓库内，禁止用相对路径
 ```
 
 - ❌ 机器上另有 **Anaconda Python 3.7**（`C:\Users\a2695\anaconda3\python.exe`）—— **绝对禁止使用**
 - 沙箱内 `PATH` 为空串，`python` / `node` / `git` **一律写绝对路径**
 - 第三方库**只能延迟导入**（例外：`app/main.py` 可顶层 `from fastapi import FastAPI`）
 - **不得修改 `SPEC.md`**；不得超出各卡 `inScope`
+- **`docs/BOARD.md` 是跨卡共享状态文件**：即使某卡把 `docs/**` 列为 outOfScope，本卡也**必须**更新它——`AGENTS.md §8` 的 DoD 强制要求「BOARD 状态已更新」，这是 outOfScope 的**唯一例外**（T-011 修）
 
 ---
 
@@ -61,6 +63,12 @@ $R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
 | T-008 | 按真实语料出 20 题正式题库 | T-006 | T1 | 待办 |
 | T-009 | 真实模式 20 题评测，产出报告 | T-007, T-008 | T1 | 待办 |
 | T-010 | 文档与交接收口 | T-009 | T2 | 待办 |
+
+## 2.5 里程碑 M3 · 治理链修复（可与其他卡并行）
+
+| ID | 任务 | 依赖 | 档位 | 状态 |
+|---|---|---|---|---|
+| T-011 | 补齐 TASK_BRIEF 并修掉治理矛盾 | — | L1 / T1 | 进行中 |
 
 **DAG**
 
@@ -465,6 +473,66 @@ Select-String -Path "$R\docs\BOARD.md" -Pattern '待办'
 
 ---
 
+## T-011 · 补齐 TASK_BRIEF 并修掉治理矛盾
+
+| | |
+|---|---|
+| **难度 / 档位** | L1 / T1 |
+| **依赖** | — |
+| **inScope** | `docs/TASK_BRIEF.md`、`docs/PLAN.md`、`docs/BOARD.md` |
+| **outOfScope** | `SPEC.md`、`AGENTS.md`、`README.md`、`src/**`、`eval/**` |
+
+**goal**：让治理链不再断在第一环——`AGENTS.md §1` 把 `docs/TASK_BRIEF.md` 定为「唯一真相源」且要求每次开工必读，但它此前是 11 节全空的模板。
+
+**为什么必须**：`AGENTS.md §9.2` 规定「发现任务书有漏洞 → 不要自行补全，提出疑问等确认」。本轮已确认两个事实：① 空模板会让「开工前必读」变成形式主义；② `AGENTS.md §8` 的 DoD 要求更新 `BOARD.md`，而 T-004 的 `outOfScope` 却排除 `docs/**`——两者不可能同时满足。
+
+**要修的三件事**
+
+1. 按 `SPEC.md` + 本计划书反推，补齐 `docs/TASK_BRIEF.md` 全部 8 节；每条验收标准必须可执行（数字 / 退出码 / 行数）
+2. `§0.2` 增加 `$K`（治理脚本绝对路径），`§3` 步骤 6 改用它 —— 原文的 `push-task.mjs` 是相对路径，仓库内没有该脚本，照抄跑不通
+3. `§0.2` 明确：`docs/BOARD.md` 是跨卡共享状态文件，**即使某卡把 `docs/**` 列为 outOfScope 也必须更新它**，否则违反 DoD
+
+**验收命令**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+
+# 1) TASK_BRIEF 不得再留 HTML 占位符
+Select-String -Path "$R\docs\TASK_BRIEF.md" -Pattern '<!--' | Measure-Object | Select-Object -ExpandProperty Count
+
+# 2) 8 个章节齐全
+Select-String -Path "$R\docs\TASK_BRIEF.md" -Pattern '^## \d' | ForEach-Object { $_.Line }
+
+# 3) PLAN 里不得再出现相对路径的 push-task.mjs
+Select-String -Path "$R\docs\PLAN.md" -Pattern 'push-task' | ForEach-Object { $_.Line.Trim() }
+
+# 4) AGENTS §6 两条命令仍全绿
+& $P -m compileall -q $R
+& $P -m unittest discover -s "$R\tests" -t $R
+```
+
+**通过标准**
+- 第 1 条输出 **0**（无 `<!--` 残留）
+- 第 2 条列出 **8** 个 `## ` 章节
+- 第 3 条每处 `push-task` 都带 `$K` 或绝对路径，**没有**裸 `push-task.mjs` 相对调用
+- 第 4 条 `compileall` 退出码 0，单测 `OK`
+
+**结论模板**
+
+```
+任务：T-011 补齐任务书与治理缺口
+改动文件：docs/TASK_BRIEF.md、docs/PLAN.md、docs/BOARD.md
+验收结果：
+  [x] 占位符残留数 —— 实际：0
+  [x] 章节数 —— 实际：8
+  [x] push-task 路径 —— 实际：<粘贴>
+  [x] compileall / 单测 —— 实际：exit 0 / Ran N tests, OK
+遗留问题：<无 / 具体描述>
+```
+
+---
+
 ## 3. 单卡执行循环
 
 ```
@@ -473,7 +541,7 @@ Select-String -Path "$R\docs\BOARD.md" -Pattern '待办'
 3. 开分支  → & "C:\Program Files\Git\cmd\git.exe" switch -c feat/T-0xx-描述
 4. 做      → 小步改，每步可运行
 5. 验      → 逐条跑本卡验收命令，记**原始输出**（不许口头声称）
-6. 交      → & "C:\Program Files\nodejs\node.exe" push-task.mjs "$R" -m "feat(T-0xx): 描述"
+6. 交      → & "C:\Program Files\nodejs\node.exe" $K "$R" -m "feat(T-0xx): 描述"
 7. 收      → 更新 docs/BOARD.md
 ```
 
@@ -502,3 +570,4 @@ Select-String -Path "$R\docs\BOARD.md" -Pattern '待办'
 |---|---|---|
 | 2026-09-18 | 初版（把模板示例换成真实卡） | 模板里的 T-001~T-003 是示例，与 `SPEC.md` 无关；实际代码已实现，缺口在依赖/题库/集成验收 |
 | 2026-09-18 | 把 `MOCK=1` 全链路验收定为**核心卡 T-007** | 这是唯一不需要 API key 就能证明项目可跑的路径；先证明能跑，再花钱 |
+| 2026-09-18 | 新增 T-011（治理链修复），并把 `$K` 写进 §0.2 | 用户确认：`TASK_BRIEF.md` 空模板必须补；实测 `push-task.mjs` 相对路径跑不通；DoD 与 T-004 的 outOfScope 直接冲突 |
