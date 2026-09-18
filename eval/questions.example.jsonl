@@ -1,0 +1,2 @@
+{"id":"q01","type":"single_hop","question":"【示例·单跳】这里写一个只靠单篇文档就能回答的问题。","gold":"这里写标准答案。","keypoints":["要点1","要点2"],"gold_sources":["示例文档名.md"],"must_refuse":false}
+{"id":"q02","type":"unanswerable","question":"【示例·不可答】这里写一个语料里根本没有依据的问题。","gold":"语料未覆盖，应拒答。","keypoints":[],"gold_sources":[],"must_refuse":true}

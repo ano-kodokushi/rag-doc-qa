@@ -1,0 +1,22 @@
+# Web 服务
+fastapi
+uvicorn[standard]
+
+# LLM / Embedding（OpenAI 兼容 SDK）
+openai
+
+# 向量库
+chromadb
+
+# 文档解析
+pypdf
+
+# 检索
+rank_bm25
+jieba
+
+# 配置
+python-dotenv
+
+# 网络请求（Rerank，二期可选）
+requests

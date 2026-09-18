@@ -1,0 +1,20 @@
+# ── 环境与密钥（真实 key 绝不入库）──
+.env
+
+# ── Python 运行产物 ──
+.venv/
+__pycache__/
+*.pyc
+
+# ── 本地数据与索引 ──
+data/chroma/
+data/chunks.jsonl
+
+# ── 原始语料：默认忽略，只放行说明文件与自有文档 ──
+# 第三方官方文档（有版权）不入库；00_ 开头的自有项目文档入库，保证 clone 下来就能跑通链路
+data/raw/*
+!data/raw/README.md
+!data/raw/00_*.md
+
+# ── 评测报告 ──
+eval/report*.json
