@@ -1,70 +1,97 @@
 # AGENTS.md · 仓库治理书
 
-> 本文件是 AI Agent 在本仓库工作的**唯一行为准则**。
+> AI Agent 在本仓库工作的**唯一行为准则**。
 > 每次会话开工前必须完整读取，再读 `docs/TASK_BRIEF.md` 与 `docs/PLAN.md`。
+> **`SPEC.md` 是需求契约（唯一权威）**，实现细节冲突时以它为准。
 
 ## 0. 项目速览
 
 | 项 | 内容 |
 |---|---|
-| 项目名 | <!-- 填写 --> |
-| 一句话目标 | <!-- 填写 --> |
-| 技术栈 | <!-- 例：Node 22 + TypeScript + pnpm + PostgreSQL --> |
-| 当前阶段 | <!-- 原型 / MVP / 迭代 / 维护 --> |
+| 项目名 | `rag-doc-qa` |
+| 一句话目标 | 一个可跑通、可评测的最小 RAG 问答服务：文档入库 → 混合检索（向量 + BM25）→ RRF 融合 →（可选）Rerank → LLM 生成带引用 → 20 题评测出真实数字 |
+| 技术栈 | Python 3.12 + FastAPI + uvicorn · ChromaDB（向量）· rank_bm25 + jieba（关键词）· openai SDK（生成 / Embedding，OpenAI 兼容端点）· pypdf · python-dotenv |
+| 当前阶段 | 原型（MVP 骨架已跑通：`compileall` 与 23 项离线单测全绿） |
+
+**本机硬约束**：沙箱内 `PATH` 为空字符串，**所有命令必须写绝对路径**。
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+```
 
 ## 1. 开工前必读（按顺序）
 
 1. 本文件 —— 规矩
-2. `docs/TASK_BRIEF.md` —— 做什么、做到什么算完
-3. `docs/PLAN.md` —— 按什么顺序做
-4. `docs/BOARD.md` —— 当前进度与阻塞
+2. `SPEC.md` —— **需求契约，唯一权威**。所有 Worker 只按它实现，不得自行改名、改签名、改文件路径
+3. `docs/TASK_BRIEF.md` —— 做什么、做到什么算完
+4. `docs/PLAN.md` —— 按什么顺序做
+5. `docs/BOARD.md` —— 当前进度与阻塞
 
 **未读完之前禁止改动任何代码。**
-三者冲突时优先级：本文件 > 任务书 > 计划书。
+冲突时优先级：`SPEC.md` > 本文件 > 任务书 > 计划书。
 
 ## 2. 目录结构约定
 
-<!-- 替换为你的真实结构，Agent 会严格按此放置文件 -->
-
 ```
-src/            源码
-tests/          测试，与 src 目录结构镜像
-docs/           文档（任务书、计划书、协调板）
-scripts/        可执行脚本
+app/             FastAPI 服务入口
+src/             核心实现（ingest / chunking / embed / store / bm25 / retrieve / fusion / generate / config）
+eval/            评测集与指标（20 题）
+tests/           离线单测（纯标准库，见 §6）
+docs/            任务书、计划书、协调板、语料来源
+data/            raw/ 语料输入；chroma/ 与 chunks.jsonl 为本地产物（已 gitignore）
 ```
 
 - 新文件必须放对应目录，**禁止在根目录堆脚本**
-- 目录名小写、中划线连接；组件文件用大驼峰，工具函数用小驼峰
+- 目录名小写、中划线连接；Python 模块用小写下划线
+- `data/chroma/`、`data/chunks.jsonl`、`eval/report*.json`、`.env` **不得入库**（见 `.gitignore`）
 
 ## 3. 分支与提交
 
 - 主分支 `main`，永远保持可运行
-- 一个任务一个分支：`feat/T-012-用户登录`、`fix/T-015-空指针`、`chore/更新依赖`
-- **禁止直接向 `main` 提交**
+- 一个任务一个分支：`feat/T-012-检索融合`、`fix/T-015-空指针`、`chore/更新依赖`
+- **禁止直接向 `main` 提交** —— 一律走分支 + 合并
 - 提交信息遵循 Conventional Commits：
   - `feat(scope): 简述` / `fix` / `docs` / `refactor` / `test` / `chore`
   - 正文写「为什么这么改」，不写「改了什么」（diff 里看得到）
 - 一个任务一个提交（或少量原子提交），**不要把无关改动混进同一次提交**
+- 已推送的提交**不得改写历史**；未推送的提交可 amend / rebase
 
 ## 4. 代码风格
 
-- 格式化与 lint 以配置文件为准：<!-- 例：eslint + prettier，禁止手改格式 -->
+- 格式化与 lint 以配置文件为准：目前**无** formatter / linter 配置，故以 PEP 8 + 本文件为准
 - 公开函数必须有简短注释说明用途与边界条件
 - 禁止无意义的注释（`i++ // 自增`）
 - 错误处理：明确区分「预期错误」与「程序 bug」，前者返回可处理的结果，后者快速失败
 - 魔法数字与重复出现的字符串必须提取为常量
+- 公开函数签名必须带类型标注（现有代码风格已如此）
 
 ## 5. 依赖政策
 
 - 新增运行时依赖前必须说明：为什么必须、包体积、许可协议、最近维护时间
 - 能用标准库 / 现有依赖解决的不引新库
-- **lock 文件必须一并提交**
+- **lock 文件必须一并提交**（目前用 `requirements.txt`，无锁定文件；引入锁定工具时须同步提交）
 - 禁止在代码中硬编码版本号以外的环境相关配置
+- **禁止引入 `SPEC.md` 非目标清单里的东西**：前端页面、登录鉴权、多用户、Redis 缓存、Docker/K8s、LangChain/LlamaIndex、微调、向量库集群、异步任务队列
 
 ## 6. 测试与验收
 
 - 改行为必补测试；只改文档、注释、格式可不补
-- 提交前本地必须全绿：`<!-- 例：pnpm test && pnpm lint -->`
+- 提交前本地必须全绿，命令为**两条**（沙箱 `PATH` 为空，必须绝对路径）：
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+
+# 1) 语法检查（全部卡都必须过）
+& $P -m compileall -q $R
+
+# 2) 离线单测（纯标准库，必须全绿）
+& $P -m unittest discover -s "$R\tests" -t $R -v
+```
+
+- 单卡验收 = 对自己负责的文件跑 `py_compile`；全局验收在全部卡落地后执行
+- `tests/test_offline.py` **不得** import `chromadb` / `openai` / `fastapi` / `jieba` / `rank_bm25` / `pypdf` / `requests`
 - 计划书里每个任务自带验收标准，完成后**逐条自查并给出证据**，不要只说「已完成」
 
 ## 7. 绝对禁止（红线）
@@ -86,8 +113,8 @@ scripts/        可执行脚本
 一个任务算完成，必须同时满足：
 
 - [ ] 计划书里该任务的验收标准逐条通过
-- [ ] 测试全绿，lint 无新增警告
-- [ ] 提交信息规范，分支已推送到远端
+- [ ] §6 两条命令全绿（`compileall` + 离线单测）
+- [ ] 提交信息规范，**分支已合并并推送到远端**
 - [ ] `docs/BOARD.md` 状态与决策记录已更新
 - [ ] 未引入任务书范围外的功能
 
@@ -95,22 +122,22 @@ scripts/        可执行脚本
 
 按固定顺序处理，不要硬扛：
 
-1. 同一问题重试超过 3 次仍失败 → 停止，写进 `BOARD.md` 的阻塞区，说明已尝试过什么
+1. 同一问题重试超过 3 次仍失败 → 停止，写进 `docs/BOARD.md` 的阻塞区，说明已尝试过什么
 2. 发现任务书有漏洞或自相矛盾 → **不要自行补全**，提出具体疑问等确认
 3. 发现范围外的既有 bug → 只记录，不修改
-4. 上下文快满 → 先把当前结论写进 `BOARD.md`，再开新会话
+4. 上下文快满 → 先把当前结论写进 `docs/BOARD.md`，再开新会话
 
 ## 10. 回报格式
 
 每完成一个任务，按以下结构汇报：
 
 ```
-任务：T-012 用户登录接口
-改动文件：src/auth/login.ts, tests/auth/login.test.ts
+任务：T-012 混合检索与 RRF 融合
+改动文件：src/retrieve.py, src/fusion.py, tests/test_offline.py
 验收结果：
-  [x] 输入正确凭据返回 token —— 见 tests/auth/login.test.ts:23
-  [x] 错误密码返回 401 —— 同上 :41
-  [ ] 连续 5 次失败锁定账号 —— 未通过，原因：<说明>
+  [x] & $P -m compileall -q $R —— 退出码 0
+  [x] & $P -m unittest discover -s "$R\tests" -t $R —— Ran 23 tests, OK
+  [ ] <某条未通过> —— 未通过，原因：<说明>
 遗留问题：<无 / 具体描述>
 下一步建议：<建议>
 ```
