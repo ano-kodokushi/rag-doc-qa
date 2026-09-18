@@ -51,10 +51,12 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 
 | ID | 任务 | 依赖 | 档位 | 状态 |
 |---|---|---|---|---|
-| T-004 | 安装依赖并冻结环境 | — | T2 | 待办 |
-| T-005 | 建 20 题题库文件（占位可直接跑） | T-004 | T2 | 待办 |
-| T-006 | 补齐语料至 10 份 | — | T2 | 待办 |
-| T-007 | mock 模式全链路验收（核心卡） | T-004, T-005, T-006 | T1 | 待办 |
+| T-004 | 安装依赖并冻结环境 | — | T2 | **完成** |
+| T-005 | 建 20 题题库文件（占位可直接跑） | T-004 | T2 | **完成** |
+| T-006 | 补齐语料至 10 份 | — | T2 | **完成** |
+| T-007 | mock 模式全链路验收（核心卡） | T-004, T-005, T-006 | T1 | **完成**（2026-09-18） |
+
+> **M1 已闭环**：`MOCK=1` 下「入库 → 检索 → 生成 → 评测」全链路跑通，零 API key、零费用。
 
 ## 2. 里程碑 M2 · 真实数字
 
@@ -68,7 +70,13 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 
 | ID | 任务 | 依赖 | 档位 | 状态 |
 |---|---|---|---|---|
-| T-011 | 补齐 TASK_BRIEF 并修掉治理矛盾 | — | L1 / T1 | 进行中 |
+| T-011 | 补齐 TASK_BRIEF 并修掉治理矛盾 | — | L1 / T1 | **完成** |
+
+## 2.6 里程碑 M4 · 缺陷修复（可与其他卡并行）
+
+| ID | 任务 | 依赖 | 档位 | 状态 |
+|---|---|---|---|---|
+| T-012 | 排除 README 等说明文件被当作语料入库 | — | L1 / T1 | 待办 |
 
 **DAG**
 
@@ -533,6 +541,75 @@ Select-String -Path "$R\docs\PLAN.md" -Pattern 'push-task' | ForEach-Object { $_
 
 ---
 
+## T-012 · 排除 README 等说明文件被当作语料入库
+
+| | |
+|---|---|
+| **难度 / 档位** | L1 / T1 |
+| **依赖** | — |
+| **inScope** | `src/ingest.py`、`tests/test_offline.py` |
+| **outOfScope** | `SPEC.md`、`eval/**`、`data/raw/**`、`docs/**` |
+
+**goal**：`read_raw_files` 不再把 `data/raw/README.md` 这类**说明文件**当作语料；`data/raw/` 的 12 份语料只产出 12 个来源。
+
+**发现过程（由 T-007 核心卡暴露，非本卡）**：T-007 实测 `& $P -m src.ingest` 输出 **`files=13`**，而 `data/raw/` 的非 README 语料只有 **12** 份。
+
+**最小复现（2026-09-18 实测，可直接粘贴）**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+Set-Location $R
+$env:MOCK = "1"
+& $P -m src.ingest     # 实际输出：files=13 chunks=405 mocked=True
+& $P -c "import json,collections;rows=[json.loads(l) for l in open('data/chunks.jsonl',encoding='utf-8')];c=collections.Counter(r['source'] for r in rows);print('来源文件数 =',len(c));print('README.md 贡献块数 =',c.get('README.md',0))"
+# 实际输出：来源文件数 = 13；README.md 贡献块数 = 5
+```
+
+**为什么是缺陷**：`data/raw/README.md` 是**语料格式说明书**（供人读），
+`T-006` 的卡面验收也明确把它排除在语料计数之外（`Where-Object { $_.Name -ne 'README.md' }`）。
+它被切块入库后，像「怎么放语料」这类**元信息**会参与检索、挤占 top-k，稀释真实文档的命中——属于检索噪声。
+
+**修复方向（不限于此，实现者自主）**：在 `read_raw_files` 中跳过 `README.md`（不区分大小写），
+并**补一条离线单测**锁住该行为（`AGENTS.md §6`：改行为必补测试）。
+
+**验收命令**
+
+```powershell
+$P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"
+$R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
+Set-Location $R
+$env:MOCK = "1"
+Remove-Item "$R\data\chunks.jsonl" -Force -ErrorAction SilentlyContinue
+Remove-Item "$R\data\chroma" -Recurse -Force -ErrorAction SilentlyContinue
+& $P -m src.ingest
+& $P -c "import json,collections;rows=[json.loads(l) for l in open('data/chunks.jsonl',encoding='utf-8')];c=collections.Counter(r['source'] for r in rows);print('来源文件数 =',len(c));print('README 是否被入库 =', 'README.md' in c)"
+& $P -m compileall -q $R
+& $P -m unittest discover -s "$R\tests" -t $R
+```
+
+**通过标准**
+- `files=12`（不再是 13），`chunks` > 0，`mocked=True`
+- `来源文件数 = 12`、`README 是否被入库 = False`
+- `compileall` 退出码 0；单测 `OK`，且**用例数比改动前多**（新增锁行为的用例）
+- `data/raw/**` 一字未动（README 必须留在原处）
+
+**红线**：不许靠「删掉 `data/raw/README.md`」让数字变绿 —— 那会同时违反 `T-006` 的通过标准（README 必须仍在）与 `AGENTS.md §7.1`。
+
+**结论模板**
+
+```
+任务：T-012 排除 README 被入库
+改动文件：src/ingest.py、tests/test_offline.py
+验收结果：
+  [x] ingest files=12 —— 原始输出：<粘贴>
+  [x] README 是否被入库 = False —— 实际：<粘贴>
+  [x] compileall / 单测 —— 实际：exit 0 / Ran N tests, OK（改动前 23）
+遗留问题：<无 / 具体描述>
+```
+
+---
+
 ## 3. 单卡执行循环
 
 ```
@@ -571,3 +648,4 @@ Select-String -Path "$R\docs\PLAN.md" -Pattern 'push-task' | ForEach-Object { $_
 | 2026-09-18 | 初版（把模板示例换成真实卡） | 模板里的 T-001~T-003 是示例，与 `SPEC.md` 无关；实际代码已实现，缺口在依赖/题库/集成验收 |
 | 2026-09-18 | 把 `MOCK=1` 全链路验收定为**核心卡 T-007** | 这是唯一不需要 API key 就能证明项目可跑的路径；先证明能跑，再花钱 |
 | 2026-09-18 | 新增 T-011（治理链修复），并把 `$K` 写进 §0.2 | 用户确认：`TASK_BRIEF.md` 空模板必须补；实测 `push-task.mjs` 相对路径跑不通；DoD 与 T-004 的 outOfScope 直接冲突 |
+| 2026-09-18 | 新增 T-012（README 被当语料入库的缺陷修复） | T-007 核心卡实测 `files=13` 而非 12：`data/raw/README.md` 被切块入库，会让「怎么放语料」这类元信息参与检索、稀释真实文档命中 |
