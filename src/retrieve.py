@@ -17,7 +17,100 @@ from src.store import VectorStore
 if TYPE_CHECKING:  # 仅类型检查期，无任何运行期耦合
     from src.config import Settings
 
-__all__ = ["Retriever"]
+__all__ = ["Retriever", "dedupe_by_section", "expand_to_sections"]
+
+#: 小节内各块拼接时的分隔符（`\n\n`，与切分层的段落边界同形）
+_SECTION_JOIN = "\n\n"
+
+#: `settings.section_mode` 的合法取值（`off` / `diverse` / `expand`）。
+#: 真正的合法性校验在 `src/config.py`，这里只声明检索层认识哪几种模式；
+#: 取值不在其中时 `Retriever._finalize` 按 `off` 处理（安全默认）。
+SECTION_MODES = ("off", "diverse", "expand")
+
+
+def dedupe_by_section(hits: list[Hit]) -> list[Hit]:
+    """按 `(source, heading)` 去重，每个小节只保留**首次出现**（排名最高）的那一块。
+
+    动机（T-020 修订 / 实测）：`expand` 把小节撑长会撞上 prompt 的 `max_chars=3000`
+    硬截断（`SECTION_EXPAND=ON` 时 4/20 题被截断，prompt 最大 4742 字符）；而把缺失要点
+    定位到它真正所在的小节后发现，**主导失分模式是「需要的内容在同一文档的另一个小节」**
+    （`q03` / `q13` 的缺失要点全在另一节，扩展命中块那一节毫无用处）。所以真正该做的是让
+    top-k 覆盖**更多不同的 `(文档, 小节)`**，而不是把小节撑长 —— 本函数只做去重，`text`
+    原样返回、不扩展。
+
+    契约：
+    - 去重键 `(source, heading)`，保留首次出现的那一条（即融合排名最高的那一条）；
+    - `text` / `chunk_id` / `score` / `retriever` / `heading` **全部原样保留**
+      （不扩展、不改 id、不改分）；
+    - 保持首次出现顺序；空输入返回 `[]`；确定性；不修改传入的 hits（也不依赖它们的可变性）；
+    - 纯标准库，不依赖任何第三方库。
+    """
+    seen_sections: set[tuple[str, str]] = set()
+    deduped: list[Hit] = []
+
+    for hit in hits:
+        section_key = (hit.source, hit.heading)
+        if section_key in seen_sections:
+            continue
+        seen_sections.add(section_key)
+        deduped.append(hit)
+
+    return deduped
+
+
+def expand_to_sections(hits: list[Hit], chunk_map: dict[str, Chunk]) -> list[Hit]:
+    """把每个命中块扩展成「它所在的小节」，并按小节去重（T-020 / EXPERIMENTS E-02）。
+
+    动机：多跳题与部分单跳题的失分不是文件级召回不够，而是**检索到的是同一文件的
+    错误小节**（`q03` / `q14` 模型答"资料里没有"，而答案就在同文件另一节里），
+    所以命中一个块时要把 `source` + `heading` 相同的**全部块**一并给模型。
+
+    ⚠️ 实测代价（T-020 修订）：拼出的小节会撞上 prompt 的 `max_chars=3000` 硬截断，
+    所以本函数只在 `SECTION_MODE=expand` 时启用；要「覆盖更多小节」而不撑长 prompt
+    应当用 `SECTION_MODE=diverse`（见 `dedupe_by_section`）。
+
+    契约：
+    - 先去重（`dedupe_by_section`，同小节只留首次命中那条），再对留下的每条取
+      `chunk_map` 里同 `source` 且同 `heading` 的块，按 `index` 升序用 `\\n\\n` 拼成
+      小节全文，替换该 hit 的 `text`；
+    - `score` / `retriever` 取首次命中的值；
+    - `chunk_id` 保持「首次命中的那个 chunk」的 id，**不改成小节 id** ——
+      `eval/metrics.py` 的 `hit_at_k` 靠 `chunk_id` 前缀匹配 `gold_sources`，
+      改成小节 id 会静默破坏全部历史指标的可比性；
+    - `heading` 保持不变；`chunk_map` 里找不到该 hit 的 `chunk_id` 时**原样保留**（不丢、不报错）；
+    - 空输入返回 `[]`；纯标准库，不依赖任何第三方库。
+    """
+    expanded: list[Hit] = []
+
+    for hit in dedupe_by_section(hits):
+        if hit.chunk_id not in chunk_map:
+            expanded.append(hit)
+            continue
+
+        section_chunks = sorted(
+            (
+                chunk
+                for chunk in chunk_map.values()
+                if chunk.source == hit.source and chunk.heading == hit.heading
+            ),
+            key=lambda chunk: chunk.index,
+        )
+        if not section_chunks:
+            expanded.append(hit)
+            continue
+
+        expanded.append(
+            Hit(
+                chunk_id=hit.chunk_id,
+                text=_SECTION_JOIN.join(chunk.text for chunk in section_chunks),
+                source=hit.source,
+                heading=hit.heading,
+                score=hit.score,
+                retriever=hit.retriever,
+            )
+        )
+
+    return expanded
 
 
 class Retriever:
@@ -164,7 +257,17 @@ class Retriever:
         top_k: int | None = None,
         use_rerank: bool | None = None,
     ) -> list[Hit]:
-        """向量 + BM25 → RRF 融合 → 取 top_k（默认 settings.top_k_final）。"""
+        """向量 + BM25 → RRF 融合 → 取 top_k（默认 settings.top_k_final）→ 按 `section_mode` 整理。
+
+        `settings.section_mode` 三模式（T-020 修订）：
+        - `off`：top-k 的块原样返回；
+        - `diverse`：按 `(source, heading)` 去重，每个小节只留排名最高的那一块，`text` 不扩展；
+        - `expand`：去重 + 把 `text` 换成该小节全文。
+
+        ⚠️ 顺序不能反：**先取 top-k，再按 mode 整理**。先去重再截断会改变 `top_k` 的语义
+        （去重发生在候选集上而非最终结果上）。整理后条数可能少于 `top_k`，这是预期行为。
+        签名与返回类型不受影响。
+        """
         if not question or not question.strip():
             return []
 
@@ -180,11 +283,24 @@ class Retriever:
             try:
                 reranked = self._rerank(question, fused_hits, top_k_final)
                 if reranked:
-                    return reranked[:top_k_final]
+                    return self._finalize(reranked[:top_k_final])
             except Exception as exc:  # rerank 失败必须降级，绝不能抛给上层
                 print(f"[warn] rerank 降级: {exc}")
 
-        return fused_hits[:top_k_final]
+        return self._finalize(fused_hits[:top_k_final])
+
+    def _finalize(self, hits: list[Hit]) -> list[Hit]:
+        """对**已取好 top_k** 的结果按 `section_mode` 整理（`off` 或未知值原样返回）。
+
+        未知值在 `src/config.py` 已被回退成 `off`，这里再兜一层：检索层不认识的值一律按
+        `off` 处理，绝不让配置写错把整个服务搞挂。
+        """
+        mode = self.settings.section_mode
+        if mode == "diverse":
+            return dedupe_by_section(hits)
+        if mode == "expand":
+            return expand_to_sections(hits, self._chunk_map())
+        return hits
 
     def debug(self, question: str) -> dict:
         """返回 {"vector":[id...],"bm25":[id...],"fused":[id...],"final":[id...]}。"""

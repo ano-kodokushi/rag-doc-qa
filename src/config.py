@@ -41,6 +41,9 @@ DEFAULTS: dict[str, str] = {
     "RERANK_API_KEY": "",
     # ── 运行模式 ──
     "MOCK": "0",
+    # ── 检索后处理 ──
+    # 检索结果整理模式（T-020 修订）：off / diverse / expand，默认 off（安全默认，行为=现状）
+    "SECTION_MODE": "off",
     # ── 路径与检索参数 ──
     "CHROMA_DIR": "data/chroma",
     "RAW_DIR": "data/raw",
@@ -55,6 +58,12 @@ DEFAULTS: dict[str, str] = {
 
 # 布尔解析的真值集合（忽略大小写）
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+# 检索结果整理模式的合法取值（去首尾空白 + 转小写后比较）
+SECTION_MODES = ("off", "diverse", "expand")
+
+# 整理模式的兜底值：非法值 / 空值一律回退到它，不抛异常
+_SECTION_MODE_FALLBACK = "off"
 
 # 路径型字段：相对路径需要与 PROJECT_ROOT 拼接
 _PATH_FIELDS = ("CHROMA_DIR", "RAW_DIR", "CHUNKS_FILE")
@@ -80,6 +89,7 @@ class Settings:
     rerank_model: str
     rerank_api_key: str
     mock: bool
+    section_mode: str
     chroma_dir: Path
     raw_dir: Path
     chunks_file: Path
@@ -196,6 +206,19 @@ def _get_bool(values: dict[str, str], key: str) -> bool:
     return str(raw).strip().lower() in _TRUE_VALUES
 
 
+def _get_section_mode(values: dict[str, str], key: str) -> str:
+    """解析检索结果整理模式：去首尾空白 + 转小写，非法值 / 空值一律回退 `off`。
+
+    与 `MOCK` / `RERANK_ENABLED` 的"缺 key 用默认值兜底，不抛异常"同一口径：
+    配置写错（拼错、写中文、留空）只该退化成安全默认，不该让整个服务起不来。
+    """
+    raw = values.get(key, DEFAULTS.get(key, _SECTION_MODE_FALLBACK))
+    if raw is None:
+        return _SECTION_MODE_FALLBACK
+    mode = str(raw).strip().lower()
+    return mode if mode in SECTION_MODES else _SECTION_MODE_FALLBACK
+
+
 def _resolve_path(value: str) -> Path:
     """相对路径一律 PROJECT_ROOT / 值，返回绝对路径。"""
     candidate = Path(value)
@@ -220,6 +243,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
             resolved[key] = _get_int(values, key)
         elif key in ("RERANK_ENABLED", "MOCK"):
             resolved[key] = _get_bool(values, key)
+        elif key == "SECTION_MODE":
+            resolved[key] = _get_section_mode(values, key)
         else:
             resolved[key] = _get_str(values, key)
 
@@ -237,6 +262,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         rerank_model=resolved["RERANK_MODEL"],  # type: ignore[arg-type]
         rerank_api_key=resolved["RERANK_API_KEY"],  # type: ignore[arg-type]
         mock=resolved["MOCK"],  # type: ignore[arg-type]
+        section_mode=resolved["SECTION_MODE"],  # type: ignore[arg-type]
         chroma_dir=resolved["CHROMA_DIR"],  # type: ignore[arg-type]
         raw_dir=resolved["RAW_DIR"],  # type: ignore[arg-type]
         chunks_file=resolved["CHUNKS_FILE"],  # type: ignore[arg-type]

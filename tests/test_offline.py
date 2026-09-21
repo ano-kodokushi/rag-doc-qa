@@ -24,8 +24,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import src.config as config  # noqa: E402
 from src.chunking import Chunk, split_text  # noqa: E402
 from src.embed import MockEmbedder, get_embedder  # noqa: E402
-from src.fusion import dedupe_keep_order, rrf_fuse  # noqa: E402
+from src.fusion import Hit, dedupe_keep_order, rrf_fuse  # noqa: E402
 from src.ingest import read_raw_files  # noqa: E402
+from src.retrieve import dedupe_by_section, expand_to_sections  # noqa: E402  # 顶层无第三方库，可离线导入
 
 from eval.metrics import (  # noqa: E402
     aggregate,
@@ -695,6 +696,299 @@ class KeypointCoverageReportTests(unittest.TestCase):
         self.assertEqual(
             summary["avg_keypoint_coverage"], aggregate(records)["avg_keypoint_coverage"]
         )
+
+
+# ==================== 9. 小节级上下文（T-020 / EXPERIMENTS E-02） ====================
+
+
+def _make_chunk(chunk_id: str, text: str, source: str, heading: str, index: int) -> Chunk:
+    """本节的测试夹具：chunk_id 与 source / index 一致，避免手写 id 时写错前缀。"""
+    return Chunk(id=chunk_id, text=text, source=source, heading=heading, index=index)
+
+
+class ExpandToSectionsTests(unittest.TestCase):
+    """E-02：失分不是文件级召回不够，而是「检索到同一文件的错误小节」——所以命中一个块时
+    要把它所在的**整个小节**给模型，并按小节去重。
+
+    本节锁死的边界：① 同小节多条 hit 去重成一条且 `text` 是组内全部块按 index 拼接；
+    ② 不同小节各自保留；③ 缺 id 的 hit 原样保留；④ 空输入 → `[]`；⑤ 保持首次出现顺序；
+    ⑥ `chunk_id` 必须是**首次命中**的那个 chunk 的 id（`hit_at_k` 靠它前缀匹配 `gold_sources`，
+    改成小节 id 会静默破坏全部历史指标的可比性）。
+
+    ⚠️ T-020 修订：本函数只服务 `SECTION_MODE=expand` 一种模式（故保留不变）；
+    `diverse`（只去重、不扩展 `text`）见 `DedupeBySectionTests`。
+    """
+
+    def test_same_section_hits_dedupe_to_first_with_whole_section_text(self) -> None:
+        chunk_map = {
+            "04.md#0000": _make_chunk("04.md#0000", "## 计算属性缓存 vs 方法", "04.md", "计算属性缓存 vs 方法", 0),
+            "04.md#0001": _make_chunk("04.md#0001", "方法调用总会重新执行函数。", "04.md", "计算属性缓存 vs 方法", 1),
+            "04.md#0002": _make_chunk("04.md#0002", "计算属性基于依赖缓存。", "04.md", "计算属性缓存 vs 方法", 2),
+        }
+        hits = [
+            Hit("04.md#0001", "方法调用总会重新执行函数。", "04.md", "计算属性缓存 vs 方法", 0.5, "fused"),
+            Hit("04.md#0002", "计算属性基于依赖缓存。", "04.md", "计算属性缓存 vs 方法", 0.4, "fused"),
+        ]
+        out = expand_to_sections(hits, chunk_map)
+
+        self.assertEqual(len(out), 1)
+        # 小节全文：同 source + 同 heading 的全部块按 index 升序、`\n\n` 连接
+        self.assertEqual(
+            out[0].text,
+            "## 计算属性缓存 vs 方法\n\n方法调用总会重新执行函数。\n\n计算属性基于依赖缓存。",
+        )
+        # chunk_id 仍是首次命中的那个块，不是小节 id、也不是后面的块
+        self.assertEqual(out[0].chunk_id, "04.md#0001")
+        self.assertEqual(out[0].score, 0.5)
+        self.assertEqual(out[0].retriever, "fused")
+        self.assertEqual(out[0].source, "04.md")
+        self.assertEqual(out[0].heading, "计算属性缓存 vs 方法")
+
+    def test_different_sections_are_kept_separately(self) -> None:
+        chunk_map = {
+            "02.md#0000": _make_chunk("02.md#0000", "reactive 的局限性一。", "02.md", "reactive() 的局限性", 0),
+            "02.md#0001": _make_chunk("02.md#0001", "数组注意事项。", "02.md", "数组和集合的注意事项", 1),
+        }
+        hits = [
+            Hit("02.md#0000", "reactive 的局限性一。", "02.md", "reactive() 的局限性", 0.3, "fused"),
+            Hit("02.md#0001", "数组注意事项。", "02.md", "数组和集合的注意事项", 0.2, "fused"),
+        ]
+        out = expand_to_sections(hits, chunk_map)
+
+        self.assertEqual([hit.chunk_id for hit in out], ["02.md#0000", "02.md#0001"])
+        self.assertEqual([hit.heading for hit in out], ["reactive() 的局限性", "数组和集合的注意事项"])
+        self.assertEqual([hit.text for hit in out], ["reactive 的局限性一。", "数组注意事项。"])
+
+    def test_same_heading_in_different_sources_are_not_deduped(self) -> None:
+        """去重键是 `(source, heading)`：不同文件的同名小节互不影响。"""
+        chunk_map = {
+            "a.md#0000": _make_chunk("a.md#0000", "甲的安装说明。", "a.md", "安装", 0),
+            "b.md#0000": _make_chunk("b.md#0000", "乙的安装说明。", "b.md", "安装", 0),
+        }
+        hits = [
+            Hit("a.md#0000", "甲的安装说明。", "a.md", "安装", 0.9, "fused"),
+            Hit("b.md#0000", "乙的安装说明。", "b.md", "安装", 0.8, "fused"),
+        ]
+        out = expand_to_sections(hits, chunk_map)
+
+        self.assertEqual([hit.chunk_id for hit in out], ["a.md#0000", "b.md#0000"])
+
+    def test_hit_missing_from_chunk_map_is_kept_unchanged(self) -> None:
+        """chunk_map 里找不到 id → 原样保留（不丢、不报错、不扩展）。"""
+        chunk_map = {
+            "k.md#0000": _make_chunk("k.md#0000", "已入库的小节正文。", "k.md", "小节甲", 0),
+        }
+        orphan = Hit("gone.md#0009", "映射里没有这个 id。", "gone.md", "消失的小节", 0.7, "rerank")
+        hits = [orphan, Hit("k.md#0000", "已入库的小节正文。", "k.md", "小节甲", 0.1, "fused")]
+
+        out = expand_to_sections(hits, chunk_map)
+
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0], orphan)
+
+    def test_keeps_first_occurrence_order(self) -> None:
+        """去重后保留首次出现顺序：`b` 小节虽然首块排在后面，但它的位置由首次命中决定。"""
+        chunk_map = {
+            "m.md#0000": _make_chunk("m.md#0000", "A 节正文。", "m.md", "A", 0),
+            "m.md#0001": _make_chunk("m.md#0001", "B 节正文一。", "m.md", "B", 1),
+            "m.md#0002": _make_chunk("m.md#0002", "B 节正文二。", "m.md", "B", 2),
+            "m.md#0003": _make_chunk("m.md#0003", "C 节正文。", "m.md", "C", 3),
+        }
+        hits = [
+            Hit("m.md#0001", "B 节正文一。", "m.md", "B", 0.9, "fused"),
+            Hit("m.md#0000", "A 节正文。", "m.md", "A", 0.8, "fused"),
+            Hit("m.md#0002", "B 节正文二。", "m.md", "B", 0.7, "fused"),
+            Hit("m.md#0003", "C 节正文。", "m.md", "C", 0.6, "fused"),
+        ]
+        out = expand_to_sections(hits, chunk_map)
+
+        self.assertEqual([hit.heading for hit in out], ["B", "A", "C"])
+        self.assertEqual([hit.chunk_id for hit in out], ["m.md#0001", "m.md#0000", "m.md#0003"])
+        # B 节用的是**首次命中**（m.md#0001）的分值，不是后面那块 0.7
+        self.assertEqual([hit.score for hit in out], [0.9, 0.8, 0.6])
+        self.assertEqual(out[0].text, "B 节正文一。\n\nB 节正文二。")
+
+    def test_empty_input_returns_empty_list(self) -> None:
+        self.assertEqual(expand_to_sections([], {}), [])
+        self.assertEqual(expand_to_sections([], {"x.md#0000": _make_chunk("x.md#0000", "t", "x.md", "h", 0)}), [])
+
+    def test_result_is_deterministic_and_does_not_mutate_inputs(self) -> None:
+        """同输入同输出；且不修改传入的 hits / chunk_map（Hit 是 frozen，但仍要验证）。"""
+        chunk_map = {
+            "d.md#0000": _make_chunk("d.md#0000", "第一块。", "d.md", "节甲", 0),
+            "d.md#0001": _make_chunk("d.md#0001", "第二块。", "d.md", "节甲", 1),
+        }
+        hits = [
+            Hit("d.md#0000", "第一块。", "d.md", "节甲", 0.5, "fused"),
+            Hit("d.md#0001", "第二块。", "d.md", "节甲", 0.4, "fused"),
+        ]
+        snapshot_hits = list(hits)
+        snapshot_map = dict(chunk_map)
+
+        first = expand_to_sections(hits, chunk_map)
+        second = expand_to_sections(list(hits), dict(chunk_map))
+
+        self.assertEqual(first, second)
+        self.assertEqual(hits, snapshot_hits)
+        self.assertEqual(chunk_map, snapshot_map)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0].text, "第一块。\n\n第二块。")
+
+
+class SectionModeConfigTests(unittest.TestCase):
+    """T-020 修订：`SECTION_MODE` 取代布尔开关 `SECTION_EXPAND`，是三值枚举。
+
+    解析口径必须是「去首尾空白 + 转小写」，且**非法值 / 空值回退 `off`** ——
+    配置写错（拼错、写中文、留空）只该退化成安全默认，不该让整个服务起不来。
+    """
+
+    def _write_env(self, content: str) -> Path:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="rag_env_section_"))
+        env_file = tmp_dir / "test.env"
+        env_file.write_text(content, encoding="utf-8")
+        return env_file
+
+    def test_section_mode_defaults_to_off(self) -> None:
+        with isolate_settings_env():
+            settings = config.load_settings(env_file=Path(tempfile.mkdtemp(prefix="rag_env_none_")) / "nope.env")
+            self.assertEqual(settings.section_mode, "off")
+            self.assertIsInstance(settings.section_mode, str)
+            self.assertEqual(config.DEFAULTS["SECTION_MODE"], "off")
+
+    def test_valid_modes_are_recognized_case_insensitively(self) -> None:
+        with isolate_settings_env():
+            for raw, expected in [
+                ("off", "off"), ("OFF", "off"), (" off ", "off"),
+                ("diverse", "diverse"), ("DiVeRsE ", "diverse"), ("\tDIVERSE\n", "diverse"),
+                ("expand", "expand"), (" Expand", "expand"),
+            ]:
+                env_file = self._write_env(f"SECTION_MODE={raw}\n")
+                settings = config.load_settings(env_file=env_file)
+                self.assertEqual(settings.section_mode, expected, raw)
+                # 与解析函数同一口径
+                self.assertEqual(settings.section_mode, config._get_section_mode({"SECTION_MODE": raw}, "SECTION_MODE"))
+
+    def test_invalid_or_empty_value_falls_back_to_off_without_raising(self) -> None:
+        with isolate_settings_env():
+            for raw in ["乱写", "true", "1", "yes", "0", "expandd", "off off", "中文模式"]:
+                env_file = self._write_env(f"SECTION_MODE={raw}\n")
+                settings = config.load_settings(env_file=env_file)
+                self.assertEqual(settings.section_mode, "off", raw)
+
+            # 空值 / 全空白 → 同样回退 off（空串不是合法值，也不是"未设置"）
+            for raw in ["", "   ", "\t"]:
+                env_file = self._write_env(f"SECTION_MODE={raw}\n")
+                self.assertEqual(config.load_settings(env_file=env_file).section_mode, "off", repr(raw))
+
+    def test_missing_key_and_malformed_env_do_not_raise(self) -> None:
+        """缺 key（.env 里根本没写）→ 默认 off；解析失败的行被跳过 → 仍是默认 off。"""
+        with isolate_settings_env():
+            no_key = self._write_env("MOCK=1\n")
+            self.assertEqual(config.load_settings(env_file=no_key).section_mode, "off")
+            broken = self._write_env("SECTION_MODE\n# 注释\n")
+            self.assertEqual(config.load_settings(env_file=broken).section_mode, "off")
+
+    def test_section_mode_is_independent_from_mock_and_rerank(self) -> None:
+        with isolate_settings_env():
+            env_file = self._write_env("MOCK=1\nRERANK_ENABLED=1\nSECTION_MODE=expand\n")
+            settings = config.load_settings(env_file=env_file)
+            self.assertIs(settings.mock, True)
+            self.assertIs(settings.rerank_enabled, True)
+            self.assertEqual(settings.section_mode, "expand")
+            # 没有 SECTION_MODE 时不受其它布尔字段影响
+            only_mock = self._write_env("MOCK=1\nRERANK_ENABLED=0\n")
+            self.assertEqual(config.load_settings(env_file=only_mock).section_mode, "off")
+
+
+class DedupeBySectionTests(unittest.TestCase):
+    """T-020 修订 / `SECTION_MODE=diverse`：让 top-k 覆盖**更多 `(文档, 小节)`**。
+
+    实测（`expand` 的教训）：把小节撑长会撞 prompt 的 `max_chars=3000` 硬截断；而把每个
+    缺失要点定位到它真正所在的小节后，主导失分模式是「需要的内容在同一文档的**另一个**
+    小节」（`q03` / `q13` 的缺失要点全在另一节）。所以 `diverse` 只去重、**不动 `text`**：
+    `text` / `chunk_id` / `score` / `retriever` / `heading` 全部原样保留。
+    """
+
+    def test_same_section_hits_dedupe_to_first_without_touching_text(self) -> None:
+        hits = [
+            Hit("04.md#0001", "方法调用总会重新执行函数。", "04.md", "计算属性缓存 vs 方法", 0.5, "fused"),
+            Hit("04.md#0002", "计算属性基于依赖缓存。", "04.md", "计算属性缓存 vs 方法", 0.4, "fused"),
+        ]
+        out = dedupe_by_section(hits)
+
+        self.assertEqual(len(out), 1)
+        # 关键：text 是**首次命中那块的原样文本**，不是小节全文（这正是与 expand 的区别）
+        self.assertEqual(out[0].text, "方法调用总会重新执行函数。")
+        self.assertEqual(out[0].chunk_id, "04.md#0001")
+        self.assertEqual(out[0].score, 0.5)
+        self.assertEqual(out[0].retriever, "fused")
+        self.assertEqual(out[0].source, "04.md")
+        self.assertEqual(out[0].heading, "计算属性缓存 vs 方法")
+        self.assertEqual(out[0], hits[0])
+
+    def test_different_sections_are_kept_separately(self) -> None:
+        hits = [
+            Hit("02.md#0000", "reactive 的局限性一。", "02.md", "reactive() 的局限性", 0.3, "fused"),
+            Hit("02.md#0001", "数组注意事项。", "02.md", "数组和集合的注意事项", 0.2, "fused"),
+            Hit("02.md#0002", "reactive 的局限性二。", "02.md", "reactive() 的局限性", 0.1, "fused"),
+        ]
+        out = dedupe_by_section(hits)
+
+        self.assertEqual([hit.chunk_id for hit in out], ["02.md#0000", "02.md#0001"])
+        self.assertEqual([hit.heading for hit in out], ["reactive() 的局限性", "数组和集合的注意事项"])
+        self.assertEqual([hit.text for hit in out], ["reactive 的局限性一。", "数组注意事项。"])
+        self.assertEqual([hit.score for hit in out], [0.3, 0.2])
+
+    def test_same_heading_in_different_sources_are_not_deduped(self) -> None:
+        """去重键是 `(source, heading)`：不同文件的同名小节互不影响。"""
+        hits = [
+            Hit("a.md#0000", "甲的安装说明。", "a.md", "安装", 0.9, "fused"),
+            Hit("b.md#0000", "乙的安装说明。", "b.md", "安装", 0.8, "fused"),
+        ]
+        out = dedupe_by_section(hits)
+
+        self.assertEqual([hit.chunk_id for hit in out], ["a.md#0000", "b.md#0000"])
+        self.assertEqual([hit.text for hit in out], ["甲的安装说明。", "乙的安装说明。"])
+
+    def test_empty_input_returns_empty_list(self) -> None:
+        self.assertEqual(dedupe_by_section([]), [])
+
+    def test_keeps_first_occurrence_order(self) -> None:
+        """保持首次出现顺序，且每个小节取的是**首次出现**那条的分值与文本。"""
+        hits = [
+            Hit("m.md#0001", "B 节正文一。", "m.md", "B", 0.9, "fused"),
+            Hit("m.md#0000", "A 节正文。", "m.md", "A", 0.8, "fused"),
+            Hit("m.md#0002", "B 节正文二。", "m.md", "B", 0.7, "rerank"),
+            Hit("m.md#0003", "C 节正文。", "m.md", "C", 0.6, "fused"),
+            Hit("m.md#0004", "A 节正文二。", "m.md", "A", 0.5, "fused"),
+        ]
+        out = dedupe_by_section(hits)
+
+        self.assertEqual([hit.heading for hit in out], ["B", "A", "C"])
+        self.assertEqual([hit.chunk_id for hit in out], ["m.md#0001", "m.md#0000", "m.md#0003"])
+        self.assertEqual([hit.score for hit in out], [0.9, 0.8, 0.6])
+        self.assertEqual([hit.retriever for hit in out], ["fused", "fused", "fused"])
+        self.assertEqual([hit.text for hit in out], ["B 节正文一。", "A 节正文。", "C 节正文。"])
+
+    def test_result_is_deterministic_and_does_not_mutate_inputs(self) -> None:
+        """同输入同输出；且不修改传入的 hits（Hit 是 frozen，但仍要验证列表本身与元素）。"""
+        hits = [
+            Hit("d.md#0000", "第一块。", "d.md", "节甲", 0.5, "fused"),
+            Hit("d.md#0001", "第二块。", "d.md", "节甲", 0.4, "fused"),
+            Hit("d.md#0002", "节乙正文。", "d.md", "节乙", 0.3, "fused"),
+        ]
+        snapshot = list(hits)
+
+        first = dedupe_by_section(hits)
+        second = dedupe_by_section(list(hits))
+
+        self.assertEqual(first, second)
+        self.assertEqual(hits, snapshot)
+        self.assertEqual(len(first), 2)
+        self.assertEqual([hit.text for hit in first], ["第一块。", "节乙正文。"])
+        # 返回的是原始 Hit 对象（不是副本），所以"原样保留"是可断言的同一性
+        self.assertIs(first[0], hits[0])
+        self.assertIs(first[1], hits[2])
 
 
 if __name__ == "__main__":
