@@ -48,7 +48,7 @@ def _assemble(question: str, materials: list[str]) -> str:
     return f"{_HEADER}\n【问题】\n{question}\n\n【资料】\n{body}\n"
 
 
-def build_prompt(question: str, hits: list[Hit], max_chars: int = 3000) -> str:
+def build_prompt(question: str, hits: list[Hit], max_chars: int = 6000) -> str:
     """构建问答 prompt。
 
     - 指令段包含 SPEC 硬要求原文；每条资料为 `[{i}] 来源：{source} > {heading}\\n{text}`，i 从 1 开始。

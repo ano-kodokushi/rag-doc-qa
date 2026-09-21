@@ -51,7 +51,7 @@ DEFAULTS: dict[str, str] = {
     "COLLECTION": "doc_qa",
     "TOP_K_VEC": "10",
     "TOP_K_BM25": "10",
-    "TOP_K_FINAL": "4",
+    "TOP_K_FINAL": "15",
     "CHUNK_SIZE": "400",
     "CHUNK_OVERLAP": "50",
 }

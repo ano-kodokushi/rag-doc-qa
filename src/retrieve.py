@@ -31,8 +31,9 @@ SECTION_MODES = ("off", "diverse", "expand")
 def dedupe_by_section(hits: list[Hit]) -> list[Hit]:
     """按 `(source, heading)` 去重，每个小节只保留**首次出现**（排名最高）的那一块。
 
-    动机（T-020 修订 / 实测）：`expand` 把小节撑长会撞上 prompt 的 `max_chars=3000`
-    硬截断（`SECTION_EXPAND=ON` 时 4/20 题被截断，prompt 最大 4742 字符）；而把缺失要点
+    动机（T-020 修订 / 实测）：`expand` 把小节撑长会撞上 prompt 的 `max_chars` 硬截断
+    （当时的契约默认值是 3000；**T-028 Step 4 已改为 6000**，但本条实测数字仍按当时口径记录）
+    （`SECTION_EXPAND=ON` 时 4/20 题被截断，prompt 最大 4742 字符）；而把缺失要点
     定位到它真正所在的小节后发现，**主导失分模式是「需要的内容在同一文档的另一个小节」**
     （`q03` / `q13` 的缺失要点全在另一节，扩展命中块那一节毫无用处）。所以真正该做的是让
     top-k 覆盖**更多不同的 `(文档, 小节)`**，而不是把小节撑长 —— 本函数只做去重，`text`
@@ -65,7 +66,8 @@ def expand_to_sections(hits: list[Hit], chunk_map: dict[str, Chunk]) -> list[Hit
     错误小节**（`q03` / `q14` 模型答"资料里没有"，而答案就在同文件另一节里），
     所以命中一个块时要把 `source` + `heading` 相同的**全部块**一并给模型。
 
-    ⚠️ 实测代价（T-020 修订）：拼出的小节会撞上 prompt 的 `max_chars=3000` 硬截断，
+    ⚠️ 实测代价（T-020 修订）：拼出的小节会撞上 prompt 的 `max_chars` 硬截断
+    （当时默认 3000，**T-028 Step 4 已改为 6000**），
     所以本函数只在 `SECTION_MODE=expand` 时启用；要「覆盖更多小节」而不撑长 prompt
     应当用 `SECTION_MODE=diverse`（见 `dedupe_by_section`）。
 

@@ -100,7 +100,7 @@ CHUNKS_FILE=data/chunks.jsonl
 COLLECTION=doc_qa
 TOP_K_VEC=10
 TOP_K_BM25=10
-TOP_K_FINAL=4
+TOP_K_FINAL=15
 CHUNK_SIZE=400
 CHUNK_OVERLAP=50
 ```
@@ -257,7 +257,7 @@ class Retriever:
 class Answer:
     text: str; citations: list[str]; latency_ms: int; prompt_chars: int; mocked: bool
 
-def build_prompt(question: str, hits: list[Hit], max_chars: int = 3000) -> str
+def build_prompt(question: str, hits: list[Hit], max_chars: int = 6000) -> str
 
 class Generator:
     def __init__(self, settings: Settings) -> None

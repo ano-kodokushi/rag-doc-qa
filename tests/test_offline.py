@@ -331,7 +331,9 @@ class LoadSettingsTests(unittest.TestCase):
             self.assertIs(settings.mock, True)
             self.assertIs(settings.rerank_enabled, False)
             # 未在 .env 中声明的 key 使用默认兜底值
-            self.assertEqual(settings.top_k_final, 4)
+            # 15 是 SPEC.md:103 的契约默认值（T-028 Step 4 由 4 改为 15）；
+            # 断言跟着契约走，不是放宽校验：数值一变这里就必须失败。
+            self.assertEqual(settings.top_k_final, 15)
 
     def test_relative_paths_resolve_to_absolute_under_project_root(self) -> None:
         with self._isolated_env():
@@ -904,7 +906,8 @@ class SectionModeConfigTests(unittest.TestCase):
 class DedupeBySectionTests(unittest.TestCase):
     """T-020 修订 / `SECTION_MODE=diverse`：让 top-k 覆盖**更多 `(文档, 小节)`**。
 
-    实测（`expand` 的教训）：把小节撑长会撞 prompt 的 `max_chars=3000` 硬截断；而把每个
+    实测（`expand` 的教训）：把小节撑长会撞 prompt 的 `max_chars` 硬截断（当时默认 3000，
+    **T-028 Step 4 已改为 6000**）；而把每个
     缺失要点定位到它真正所在的小节后，主导失分模式是「需要的内容在同一文档的**另一个**
     小节」（`q03` / `q13` 的缺失要点全在另一节）。所以 `diverse` 只去重、**不动 `text`**：
     `text` / `chunk_id` / `score` / `retriever` / `heading` 全部原样保留。
