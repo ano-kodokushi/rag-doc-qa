@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -32,6 +33,16 @@ from eval.metrics import (  # noqa: E402
     keypoints_match,
     normalize_answer,
     score_answer,
+)
+
+# eval.run_eval 也可以离线导入：它的第三方库（chromadb / openai）全部在**函数内延迟导入**，
+# 模块顶层只有标准库 + 项目内模块（实测 import 后 sys.modules 里 0 个第三方库），
+# 因此不违反 AGENTS.md §6「tests/test_offline.py 不得 import chromadb / openai / ...」。
+from eval.run_eval import (  # noqa: E402
+    RECORD_FIELDS,
+    SUMMARY_FIELDS,
+    run_once,
+    summarize,
 )
 
 # 全角与半角标点样本（SPEC 304 列出的字符集合）
@@ -437,6 +448,253 @@ class ReadRawFilesTests(unittest.TestCase):
         docs = read_raw_files(raw_dir)
 
         self.assertEqual([doc.source for doc in docs], ["02_知识.md"])
+
+
+# ==================== 8. 连续 keypoint 覆盖率接入评测报告（T-019） ====================
+
+
+class _StubRetriever:
+    """`run_once` 只用到 `search(text, top_k)`；桩对象让本节用例完全不碰 chromadb。"""
+
+    def __init__(self, chunk_ids: list[str]) -> None:
+        self._chunk_ids = chunk_ids
+
+    def search(self, text: str, top_k: int) -> list[SimpleNamespace]:
+        return [SimpleNamespace(chunk_id=cid) for cid in self._chunk_ids[:top_k]]
+
+
+class _StubAnswer:
+    def __init__(self, text: str, citations: list[str]) -> None:
+        self.text = text
+        self.citations = citations
+
+
+class _StubGenerator:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def answer(self, text: str, hits: list[SimpleNamespace]) -> _StubAnswer:
+        return _StubAnswer(self._text, ["1"])
+
+
+class KeypointCoverageReportTests(unittest.TestCase):
+    """T-019：把**连续** keypoint 覆盖率接进评测报告。
+
+    动机（`docs/EXPERIMENTS.md` E-02）：桶指标（对 / 部分对 / 错，阈值 0.8）把
+    「覆盖率 0.450 → 0.550、逐题 5 升 0 降」压成了"一分未动"，读出了**相反**的结论。
+    所以覆盖率必须由报告本身给出，而不是每次靠临时脚本回读逐题明细。
+    本节锁三件事：① `run_once` 新增键且取值就是 `keypoints_match`；
+    ② `aggregate` 把拒答题排除在 `avg_keypoint_coverage` 之外、无记录时给 0.0；
+    ③ 既有 7 个汇总字段仍在、语义未变。
+    """
+
+    def setUp(self) -> None:
+        # load_settings 会读环境变量，必须与调用者 shell 隔离（PLAN T-013）
+        isolated = isolate_settings_env()
+        isolated.__enter__()
+        self.addCleanup(isolated.__exit__, None, None, None)
+        self.settings = config.load_settings()
+
+    def _question(self, **overrides: object) -> dict:
+        question: dict = {
+            "id": "q-test",
+            "type": "single_hop",
+            "question": "中国的首都是哪里",
+            "gold": "北京",
+            "keypoints": ["北京", "首都", "上海"],
+            "gold_sources": ["a.md"],
+            "must_refuse": False,
+        }
+        question.update(overrides)
+        return question
+
+    # —— 冻结接口 1：run_once 新增 keypoint_coverage ——
+
+    def test_run_once_keypoint_coverage_equals_keypoints_match(self) -> None:
+        """新键必须是 `keypoints_match(pred, keypoints)` 本身，而不是另一把尺子。"""
+        question = self._question()
+        pred = "北京是中国的首都。"
+        record = run_once(
+            self.settings,
+            question,
+            "mock",
+            _StubRetriever(["a.md#0000"]),
+            _StubGenerator(pred),
+            4,
+        )
+        self.assertAlmostEqual(record["keypoint_coverage"], 2 / 3, places=12)
+        self.assertEqual(
+            record["keypoint_coverage"], keypoints_match(pred, question["keypoints"])
+        )
+        # 覆盖率是浮点、落在 0~1
+        self.assertIsInstance(record["keypoint_coverage"], float)
+        self.assertGreaterEqual(record["keypoint_coverage"], 0.0)
+        self.assertLessEqual(record["keypoint_coverage"], 1.0)
+        # 顺带锁住「桶」的口径没变：score 仍由 score_answer 用同一批入参算出
+        self.assertEqual(
+            record["score"], score_answer(pred, question["gold"], question["keypoints"], False)
+        )
+        self.assertEqual(record["score"], "partial")
+
+        # 拒答题：keypoints 为空 → 覆盖率 0.0（aggregate 会把它排除在均值外）
+        refusal = run_once(
+            self.settings,
+            self._question(id="q-refuse", type="unanswerable", keypoints=[], must_refuse=True),
+            "mock",
+            _StubRetriever(["a.md#0000"]),
+            _StubGenerator("资料中未提及相关内容。"),
+            4,
+        )
+        self.assertEqual(refusal["keypoint_coverage"], 0.0)
+        self.assertEqual(refusal["score"], "correct")
+
+    def test_run_once_record_keys_are_frozen_plus_coverage(self) -> None:
+        """既有 11 个记录键一个都没少，新键只追加在末尾（构造顺序 = 声明顺序）。"""
+        record = run_once(
+            self.settings,
+            self._question(),
+            "retrieval",
+            _StubRetriever([]),
+            None,
+            4,
+        )
+        self.assertEqual(tuple(record), RECORD_FIELDS)
+        for key in (
+            "id",
+            "type",
+            "question",
+            "pred",
+            "gold",
+            "must_refuse",
+            "score",
+            "retrieved_ids",
+            "hit",
+            "citation_hit",
+            "latency_ms",
+        ):
+            self.assertIn(key, record)
+        self.assertIn("keypoint_coverage", record)
+
+    # —— 冻结接口 2：aggregate 新增 avg_keypoint_coverage ——
+
+    def test_aggregate_avg_keypoint_coverage_excludes_refusal_records(self) -> None:
+        records = [
+            {"score": "correct", "hit": True, "must_refuse": False, "keypoint_coverage": 0.8},
+            {"score": "partial", "hit": False, "must_refuse": False, "keypoint_coverage": 0.5},
+            {"score": "correct", "hit": False, "must_refuse": True, "keypoint_coverage": 0.0},
+        ]
+        stats = aggregate(records)
+
+        # 拒答题（must_refuse=True）被排除：只对 0.8 / 0.5 求平均
+        self.assertAlmostEqual(stats["avg_keypoint_coverage"], 0.65, places=12)
+        # 若把拒答题也算进去会得到 0.4333…，本断言锁死"不算进去"
+        self.assertNotAlmostEqual(stats["avg_keypoint_coverage"], 1.3 / 3, places=6)
+        # 与 refusal_accuracy 同一口径：缺 must_refuse 键但 type=unanswerable 也排除
+        with_fallback = records + [{"score": "wrong", "type": "unanswerable", "keypoint_coverage": 1.0}]
+        self.assertAlmostEqual(
+            aggregate(with_fallback)["avg_keypoint_coverage"], 0.65, places=12
+        )
+        # 既有指标语义未变（同一批 records 上照旧）
+        self.assertEqual(stats["n"], 3)
+        self.assertAlmostEqual(stats["accuracy"], 2 / 3, places=6)
+        self.assertAlmostEqual(stats["partial_rate"], 1 / 3, places=6)
+        self.assertEqual(stats["wrong_rate"], 0.0)
+        self.assertAlmostEqual(stats["hit_rate"], 1 / 3, places=6)
+        self.assertAlmostEqual(stats["refusal_accuracy"], 1.0, places=6)
+
+    def test_aggregate_avg_keypoint_coverage_zero_without_answerable_records(self) -> None:
+        """没有可参与求平均的记录 → 0.0（空列表、全是拒答题两种情形）。"""
+        empty = aggregate([])
+        self.assertEqual(empty["n"], 0)
+        self.assertEqual(empty["avg_keypoint_coverage"], 0.0)
+        self.assertIsInstance(empty["avg_keypoint_coverage"], float)
+
+        refusal_only = [
+            {"score": "correct", "hit": False, "must_refuse": True, "keypoint_coverage": 0.0},
+            {"score": "wrong", "hit": False, "type": "unanswerable", "keypoint_coverage": 0.9},
+        ]
+        stats = aggregate(refusal_only)
+        self.assertEqual(stats["n"], 2)
+        self.assertEqual(stats["avg_keypoint_coverage"], 0.0)
+        self.assertIsInstance(stats["avg_keypoint_coverage"], float)
+
+    def test_aggregate_skips_records_without_numeric_coverage(self) -> None:
+        """缺键 / None / 非数值 → 不进分子也不进分母（**不当作 0.0**）。
+
+        把"没测到"读成"覆盖率为零"会让均值无声偏小 —— 那正是 E-02 要避免的静默误读。
+        """
+        records = [
+            {"score": "partial", "hit": False, "must_refuse": False, "keypoint_coverage": 0.25},
+            {"score": "partial", "hit": False, "must_refuse": False},
+            {"score": "partial", "hit": False, "must_refuse": False, "keypoint_coverage": None},
+            {"score": "partial", "hit": False, "must_refuse": False, "keypoint_coverage": "0.9"},
+        ]
+        stats = aggregate(records)
+        self.assertAlmostEqual(stats["avg_keypoint_coverage"], 0.25, places=12)
+        self.assertNotAlmostEqual(stats["avg_keypoint_coverage"], 0.0625, places=6)
+        self.assertEqual(stats["n"], 4)
+
+    # —— 冻结接口 3：SUMMARY_FIELDS 追加字段，既有 7 键不变 ——
+
+    def test_summary_fields_frozen_seven_keys_plus_coverage(self) -> None:
+        """`summarize` 输出的 7 个既有字段名 / 顺序 / 语义不变，新字段追加在末尾。"""
+        self.assertEqual(
+            SUMMARY_FIELDS,
+            (
+                "n",
+                "accuracy",
+                "partial_rate",
+                "wrong_rate",
+                "refusal_accuracy",
+                "hit_rate",
+                "avg_latency_ms",
+                "avg_keypoint_coverage",
+            ),
+        )
+
+        records = [
+            {
+                "score": "correct",
+                "hit": True,
+                "must_refuse": False,
+                "keypoint_coverage": 1.0,
+                "latency_ms": 100,
+            },
+            {
+                "score": "partial",
+                "hit": False,
+                "must_refuse": False,
+                "keypoint_coverage": 0.5,
+                "latency_ms": 200,
+            },
+            {
+                "score": "correct",
+                "hit": False,
+                "must_refuse": True,
+                "keypoint_coverage": 0.0,
+                "latency_ms": 300,
+            },
+        ]
+        summary = summarize(records)
+
+        # 键集合与顺序 = 冻结清单（改名 / 删键 / 换序都会在这里失败）
+        self.assertEqual(tuple(summary), SUMMARY_FIELDS)
+
+        # 原有 7 键语义未变
+        self.assertEqual(summary["n"], 3)
+        self.assertAlmostEqual(summary["accuracy"], 2 / 3, places=6)
+        self.assertAlmostEqual(summary["partial_rate"], 1 / 3, places=6)
+        self.assertEqual(summary["wrong_rate"], 0.0)
+        self.assertAlmostEqual(summary["refusal_accuracy"], 1.0, places=6)
+        self.assertAlmostEqual(summary["hit_rate"], 1 / 3, places=6)
+        self.assertAlmostEqual(summary["avg_latency_ms"], 200.0, places=6)
+
+        # 新增键：0~1 的浮点，只对非拒答记录求平均
+        self.assertIsInstance(summary["avg_keypoint_coverage"], float)
+        self.assertAlmostEqual(summary["avg_keypoint_coverage"], 0.75, places=12)
+        self.assertEqual(
+            summary["avg_keypoint_coverage"], aggregate(records)["avg_keypoint_coverage"]
+        )
 
 
 if __name__ == "__main__":

@@ -27,15 +27,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from eval.metrics import aggregate, citation_hit, hit_at_k, score_answer
+from eval.metrics import aggregate, citation_hit, hit_at_k, keypoints_match, score_answer
 from src.config import Settings, load_settings
 from src.generate import get_generator
 from src.retrieve import Retriever
 
 MODES = ("retrieval", "full", "mock")
 
-# 记录键（SPEC §5 冻结顺序 + 本文件新增的 must_refuse，仅用于结构自检，不改变既有键名）。
-# must_refuse 放在 gold 之后，与 run_once 里的构造顺序保持一致。
+# 记录键（SPEC §5 冻结顺序 + 本文件新增的 must_refuse 与 keypoint_coverage，
+# 仅用于结构自检，不改变既有键名）。
+# must_refuse 放在 gold 之后、keypoint_coverage 放在最后，与 run_once 里的构造顺序保持一致。
 RECORD_FIELDS = (
     "id",
     "type",
@@ -48,9 +49,12 @@ RECORD_FIELDS = (
     "hit",
     "citation_hit",
     "latency_ms",
+    "keypoint_coverage",
 )
 
-# 汇总字段顺序（前 6 个来自 aggregate，最后一个是所有记录 latency_ms 的平均）
+# 汇总字段顺序（前 7 个来自 aggregate 与 summarize，最后一个是所有记录 latency_ms 的平均）。
+# avg_keypoint_coverage 是**向后兼容扩展**：既有 7 个字段的名字、顺序、语义一律不变
+# （理由与登记见 docs/PLAN.md §5 已知限制第 13 条）。
 SUMMARY_FIELDS = (
     "n",
     "accuracy",
@@ -59,6 +63,7 @@ SUMMARY_FIELDS = (
     "refusal_accuracy",
     "hit_rate",
     "avg_latency_ms",
+    "avg_keypoint_coverage",
 )
 
 
@@ -168,11 +173,18 @@ def run_once(
         "hit": hit_at_k(retrieved_ids, gold_sources, top_k),
         "citation_hit": citation_hit(citations, gold_sources),
         "latency_ms": latency_ms,
+        # 连续指标（新增键，向后兼容）：本题的关键点覆盖率，0.0..1.0。
+        # 取值与 score_answer 的分桶依据同源（同一个 keypoints 列表、同一个
+        # keypoints_match），保证「桶」与「连续值」永远出自一把尺子；
+        # 拒答题的 keypoints 为空 → 恒为 0.0，aggregate 会把它排除在均值之外。
+        # 为什么要有它：桶指标（阈值 0.8）看不见 0.45 → 0.55 这类真实变化，
+        # 详见 docs/EXPERIMENTS.md E-02。
+        "keypoint_coverage": keypoints_match(pred, keypoints),
     }
 
 
 def summarize(records: list[dict]) -> dict:
-    """aggregate 的 6 个字段 + avg_latency_ms（无记录时 0.0）。"""
+    """aggregate 的 7 个字段 + avg_latency_ms（无记录时 0.0）。"""
     summary = dict(aggregate(records))
     if records:
         avg = sum(float(r.get("latency_ms", 0) or 0) for r in records) / len(records)
@@ -192,6 +204,9 @@ def format_summary(summary: dict) -> str:
         f"拒答准确率    refusal_accuracy = {summary['refusal_accuracy']:.4f}",
         f"检索命中率    hit_rate = {summary['hit_rate']:.4f}",
         f"平均延迟      avg_latency_ms = {summary['avg_latency_ms']:.2f}",
+        # 连续主指标（E-02 确立）：桶指标看不见的改进靠它才看得见；
+        # 分母是**非拒答**记录数，故与 n 不同。
+        f"平均覆盖率    avg_keypoint_coverage = {summary['avg_keypoint_coverage']:.4f}",
     ]
     return "\n".join(lines)
 

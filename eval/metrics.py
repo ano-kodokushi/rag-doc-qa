@@ -263,13 +263,28 @@ def _is_refusal_record(rec: dict) -> bool:
     return False
 
 
+def _record_keypoint_coverage(rec: dict) -> float | None:
+    """取一条记录的连续 keypoint 覆盖率；记录里没有可用数值时返回 ``None``。
+
+    ``run_once`` 会写入 ``keypoint_coverage``（0.0..1.0）。记录缺该键、值为
+    ``None`` 或非数值（含布尔）时返回 ``None`` 而不是 ``0.0``：把"没测到"
+    当成"覆盖率为零"会让均值无声偏小 —— 那正是 ``docs/EXPERIMENTS.md`` E-02
+    要求避免的"静默误读"。调用方据此决定进不进分母。
+    """
+    value = rec.get("keypoint_coverage")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def aggregate(records: list[dict]) -> dict:
-    """聚合评测记录，返回 6 个指标的字典。
+    """聚合评测记录，返回 7 个指标的字典。
 
     返回结构::
 
         {"n": int, "accuracy": float, "partial_rate": float,
-         "wrong_rate": float, "refusal_accuracy": float, "hit_rate": float}
+         "wrong_rate": float, "refusal_accuracy": float, "hit_rate": float,
+         "avg_keypoint_coverage": float}
 
     - ``accuracy`` = ``score == "correct"`` 的占比；
     - ``partial_rate`` = ``score == "partial"`` 的占比；
@@ -277,7 +292,17 @@ def aggregate(records: list[dict]) -> dict:
     - ``refusal_accuracy`` = 拒答题集合中 ``score == "correct"`` 的占比
       （集合为空 → 0.0）；
     - ``hit_rate`` = ``hit`` 为真的占比（``hit`` 取记录里的 ``hit`` 字段，
-      非 ``True`` 的取值一律按未命中处理）。
+      非 ``True`` 的取值一律按未命中处理）；
+    - ``avg_keypoint_coverage`` = **非拒答记录**的连续 keypoint 覆盖率均值
+      （每题的 ``keypoint_coverage`` 由 ``run_once`` 用 ``keypoints_match`` 算出）。
+      拒答题的 ``keypoints`` 为空、覆盖率恒为 0.0，计入只会把均值拉低、让指标
+      失去意义，故按 ``_is_refusal_record`` 的**同一口径**排除（显式
+      ``must_refuse=True`` 与「缺字段 + ``type == "unanswerable"``」两种拒答题都不进分母）。
+      记录缺该键 / 值为 ``None`` / 非数值时**既不进分子也不进分母**（见
+      ``_record_keypoint_coverage``）；没有可参与求平均的记录 → ``0.0``。
+      为什么要有这个连续指标：``docs/EXPERIMENTS.md`` E-02 证明桶指标
+      （对 / 部分对 / 错，阈值 0.8）会把「覆盖率 0.450 → 0.550、逐题 5 升 0 降」
+      压成"一分未动"，从而读出**相反**的结论 —— 粒度决定了你能看见什么。
 
     拒答题集合的判定规则（见 ``_is_refusal_record``）：
 
@@ -306,6 +331,7 @@ def aggregate(records: list[dict]) -> dict:
             "wrong_rate": 0.0,
             "refusal_accuracy": 0.0,
             "hit_rate": 0.0,
+            "avg_keypoint_coverage": 0.0,
         }
 
     correct = 0
@@ -314,6 +340,7 @@ def aggregate(records: list[dict]) -> dict:
     hit = 0
     refusal_total = 0
     refusal_correct = 0
+    coverage_values: list[float] = []
 
     for row in rows:
         score = row.get("score")
@@ -331,6 +358,10 @@ def aggregate(records: list[dict]) -> dict:
             refusal_total += 1
             if score == CORRECT:
                 refusal_correct += 1
+        else:
+            coverage = _record_keypoint_coverage(row)
+            if coverage is not None:
+                coverage_values.append(coverage)
 
     return {
         "n": n,
@@ -339,4 +370,7 @@ def aggregate(records: list[dict]) -> dict:
         "wrong_rate": wrong / n,
         "refusal_accuracy": (refusal_correct / refusal_total) if refusal_total else 0.0,
         "hit_rate": hit / n,
+        "avg_keypoint_coverage": (
+            sum(coverage_values) / len(coverage_values) if coverage_values else 0.0
+        ),
     }
