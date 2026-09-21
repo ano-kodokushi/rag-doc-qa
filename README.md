@@ -234,10 +234,35 @@ mock 阶段不消耗任何额度，也能定位绝大多数环境/导入/路径�
   评测报告里的 `avg_latency_ms` 由 `eval/run_eval.py` 独立计时，自始不受此缺陷影响。
 - FastAPI 四份语料缺少代码示例（官方源码用构建期宏引用，共 29 处未展开），涉及代码细节的问题在语料里没有依据（见 `docs/DOC_SOURCES.md §5.1`）。
 - 自有项目文档（需求 / 库表 / 接口 / 部署 / 状态机）尚未补入，当前语料全是框架官方文档（见 `docs/DOC_SOURCES.md §二`）。
+  → **2026-09-21 更新**：这条路被用户否决，改为**新增第二语料域「软件工程实践」**（见下节），
+  内容是本人的课程作业与项目文档（需求规格说明书、投标建议书、ERP 实施与实验、系统分析与设计、软件体系结构 SAAM、SOA 调研等）。
 - ⚠️ **rerank 的失败是「静默降级」**：`_rerank` 的任何异常都被吞掉、只打印一行 `[warn] rerank 降级: ...`，随后返回融合结果。
   好处是服务不会挂（已用错误 key 实测：401 → 降级 → 结果与融合结果逐字一致）；代价是**「rerank 没效果」这种结论可能只是降级了** —— 排障时先看有没有这行日志。
 - ⚠️ **rerank 模型有生命周期风险**：官方已公告 `gte-rerank` 下线、推荐 `qwen3-rerank`。实测当前端点接受两者（可纯靠 `RERANK_MODEL` 切换），但那是**实测行为、非文档承诺**（见 `docs/PLAN.md §5.15`）。
 - ⚠️ **rerank 的 `q14` 是唯一变差的题**（覆盖率 0.500 → 0.250）：rerank **不是单调改进**，它会为了一些题把另一些题的正确答案排下去。
+
+## 第二语料域：软件工程实践（`doc_qa_se`）
+
+除第一域（框架官方文档）外，本仓库还支持**并列的第二套语料与索引** —— 用于验证「同一套代码换语料」的能力，
+也让项目从"回答框架文档"扩展到"回答我自己的课程与项目材料"。
+
+- 语料：**19 份 / 中文 169,083 字**（11 份本人作品 + 8 份课程与案例文档），台账见 `docs/DOC_SOURCES_SE.md`
+- 索引与第一域**完全隔离**：`COLLECTION=doc_qa_se` · `RAW_DIR=data/raw_se` · `CHROMA_DIR=data/chroma_se` · `CHUNKS_FILE=data/chunks_se.jsonl`
+  （这四个都是**环境变量**，所以**不必改代码、也不必改 `SPEC.md`** 就能并存两套）
+- 入库实测：`files=19 chunks=830`
+
+```powershell
+$env:RAW_DIR = "data/raw_se"; $env:CHROMA_DIR = "data/chroma_se"
+$env:CHUNKS_FILE = "data/chunks_se.jsonl"; $env:COLLECTION = "doc_qa_se"
+& $P -m src.ingest                                          # 入库第二域
+& $P -m eval.run_eval --mode full --questions eval/questions_se.jsonl --out eval/report_se.json
+```
+
+⚠️ **两域的数字不可比**：语料、题库、难度全都不同（这也是为什么要**新增域**而不是替换 ——
+`eval/README.md §3.5` 规定题目定稿后不得修改，替换会让第一域的全部历史结论失去可比性）。
+
+⚠️ **第二域语料不入公开仓库**（`.gitignore` 已忽略 `data/raw_se/`）：内容是本人课程作业（含学号与同学、导师姓名）与课程/案例材料，
+属隐私与第三方版权范畴 ⇒ **clone 后无法直接跑 `doc_qa_se`**，需要自己放语料。
 
 ## 安全约定
 

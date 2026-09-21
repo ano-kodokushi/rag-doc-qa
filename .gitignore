@@ -16,5 +16,12 @@ data/raw/*
 !data/raw/README.md
 !data/raw/00_*.md
 
+# ── 第二语料域（T-026）：软件工程实践 ──
+# 全部忽略：内容是本人课程作业（含学号、同学与导师姓名），且部分是他人的课程/案例材料
+# ⇒ 既不进公开仓库，也不需要 `!` 放行任何文件（`data/raw_se/README.md` 故意不建）
+data/raw_se/
+data/chroma_se/
+data/chunks_se.jsonl
+
 # ── 评测报告 ──
 eval/report*.json
