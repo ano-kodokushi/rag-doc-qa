@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import io
 import os
 import sys
 import tempfile
@@ -989,6 +990,126 @@ class DedupeBySectionTests(unittest.TestCase):
         # 返回的是原始 Hit 对象（不是副本），所以"原样保留"是可断言的同一性
         self.assertIs(first[0], hits[0])
         self.assertIs(first[1], hits[2])
+
+
+# ==================== 10. rerank 守卫 / 降级 / 接线（T-021） ====================
+
+
+def _hit(chunk_id: str) -> Hit:
+    """本节夹具：只要一个可辨识的 chunk_id，其余字段固定，避免在断言里混进无关变量。"""
+    return Hit(chunk_id, f"{chunk_id} 的正文", "d.md", "节甲", 0.5, "fused")
+
+
+class RerankGuardTests(unittest.TestCase):
+    """T-021：`Retriever.search` 里 rerank 分支的三条契约，全离线锁定。
+
+    动机：rerank 是**真实网络调用**（`src/retrieve.py` 的 `_rerank` 内 `requests.post`），
+    而"rerank 到底有没有效果"的结论只有在「三件事同时被证明」时才算数：
+    ① `MOCK=1` 时一次都不调用（否则 mock 跑批会偷偷产生真实费用与网络依赖）；
+    ② 远端失败时静默降级成融合结果，而不是把异常抛给上层、更不是返回空；
+    ③ 远端成功时输出**真的被采用**（顺序生效 + 受 `top_k_final` 截断）——
+    否则「rerank 无效」可能只是接线接错了（把返回值丢掉、退回融合结果）。
+
+    成本：`Retriever.__init__` 会 `get_embedder` + `VectorStore`（即 chromadb），所以这里一律
+    `object.__new__(Retriever)` 绕开构造，只注入 `search()` 真正用到的属性与可调用对象；
+    被替换的方法作为**实例属性**存的是普通函数，不再走描述符绑定，因此签名里没有 `self`。
+    """
+
+    def _build_retriever(
+        self,
+        settings: config.Settings,
+        hits: list[Hit],
+        rerank,
+    ) -> object:
+        """造一个只够 `search()` 跑通的最小 Retriever 桩（完全不碰 chromadb / 网络）。"""
+        from src.retrieve import Retriever  # 延迟导入，保持与文件既有风格一致
+
+        retriever = object.__new__(Retriever)
+        retriever.settings = settings
+        # 两路召回排名：只给定 vector 一路，`_rankings` 的返回值形状与真实实现一致
+        retriever._rankings = lambda question: {
+            "vector": [hit.chunk_id for hit in hits],
+            "bm25": [],
+        }
+        # 融合结果直接用给定 hits：本节的关注点是 rerank 分支，不是 RRF 计分（已由 FusionTests 覆盖）
+        retriever._chunk_map = lambda: {}
+        retriever._fused_hits = lambda rankings, chunk_map: ([hit.chunk_id for hit in hits], list(hits))
+        retriever._rerank = rerank
+        return retriever
+
+    def test_mock_mode_never_calls_rerank(self) -> None:
+        """`MOCK=1` 即使 `RERANK_ENABLED=1` 也必须零 rerank 调用 —— 这是 mock 模式的全部价值。
+
+        本用例删掉守卫（改成只看 `rerank_enabled`）后会立刻失败：mock 跑批会开始访问真实
+        rerank 端点，既产生费用，也让"离线可重复"不复存在。
+        """
+        with isolate_settings_env():
+            base = config.load_settings()
+        settings = dataclasses.replace(base, mock=True, rerank_enabled=True)
+
+        calls: list[str] = []
+
+        def _forbidden_rerank(question: str, hits: list[Hit], top_n: int) -> list[Hit]:
+            calls.append(question)
+            raise AssertionError("MOCK=1 时不应触发 rerank（真实网络调用）")
+
+        retriever = self._build_retriever(settings, [_hit("f1"), _hit("f2"), _hit("f3")], _forbidden_rerank)
+        out = retriever.search("x")
+
+        self.assertEqual(calls, [], "rerank 被调用了，mock 模式不再零网络零费用")
+        self.assertEqual([hit.chunk_id for hit in out], ["f1", "f2", "f3"])
+
+    def test_rerank_failure_degrades_to_fused_result(self) -> None:
+        """远端 rerank 抛错时必须静默降级成**融合结果**，既不抛给上层，也不退化成空列表。
+
+        只打印告警、不改变返回值，是"检索质量可以降级，服务不能挂"的边界；
+        返回空列表同样是失败：生成阶段会拿不到任何证据，问答直接变成拒答。
+        """
+        with isolate_settings_env():
+            base = config.load_settings()
+        settings = dataclasses.replace(base, mock=False, rerank_enabled=True)
+        hits = [_hit("f1"), _hit("f2"), _hit("f3")]
+
+        def _boom(question: str, hits_: list[Hit], top_n: int) -> list[Hit]:
+            raise RuntimeError("boom")
+
+        retriever = self._build_retriever(settings, hits, _boom)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            out = retriever.search("x")  # 这里抛异常即用例失败，不需要额外断言
+
+        # 对照：显式关掉 rerank 的同一份融合池
+        retriever_off = self._build_retriever(settings, hits, _boom)
+        expected = retriever_off.search("x", use_rerank=False)
+        self.assertEqual([hit.chunk_id for hit in out], [hit.chunk_id for hit in expected])
+        self.assertEqual([hit.chunk_id for hit in out], ["f1", "f2", "f3"])
+        self.assertNotEqual(out, [])
+        # 降级必须是"可见"的：否则线上会静默丢掉 rerank 而不被察觉
+        self.assertIn("[warn] rerank", stdout.getvalue())
+
+    def test_rerank_order_is_actually_used(self) -> None:
+        """rerank 的输出必须真的生效：返回顺序 = rerank 给的顺序，且条数受 `top_k_final` 截断。
+
+        这条锁的是"接线"而不是"效果"：若 `search()` 忽略 rerank 返回值直接返回融合结果，
+        「rerank 无效」的结论可能纯属接线接错；也不能让 rerank 返回多少就给模型多少
+        （`top_n` 只是请求参数，远端不一定守约，切分仍必须由本地 `top_k_final` 把住）。
+        """
+        with isolate_settings_env():
+            base = config.load_settings()
+        # 融合池 4 条、top_k_final=4，而 rerank 故意返回 6 条（模拟远端不守 top_n）
+        settings = dataclasses.replace(base, mock=False, rerank_enabled=True, top_k_final=4)
+        hits = [_hit(f"f{i}") for i in range(4)]
+        extra = [_hit("x5"), _hit("x6")]
+
+        def _reverse(question: str, hits_: list[Hit], top_n: int) -> list[Hit]:
+            self.assertEqual([hit.chunk_id for hit in hits_], ["f0", "f1", "f2", "f3"])
+            return list(reversed(hits_)) + extra
+
+        retriever = self._build_retriever(settings, hits, _reverse)
+        out = retriever.search("x")
+
+        self.assertEqual([hit.chunk_id for hit in out], ["f3", "f2", "f1", "f0"])
+        self.assertEqual(len(out), settings.top_k_final)
 
 
 if __name__ == "__main__":
