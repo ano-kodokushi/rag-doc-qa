@@ -33,7 +33,10 @@
 ```powershell
 $P = "C:\Users\a2695\AppData\Local\Programs\Python\Python312\python.exe"   # 唯一允许的解释器
 $R = "C:\Users\a2695\Desktop\作业\Agent\rag-doc-qa"
-$K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-task.mjs"   # 治理套件脚本，不在仓库内，禁止用相对路径
+$K = "C:\Users\a2695\Desktop\作业\Agent\agent-project-kit\push-task.mjs"   # 治理脚本：在工作区根目录，**不在仓库内**，禁止用相对路径
+# ⚠️ 这是**仓库外的本机路径**，会随工作区整理而失效（T-017 就是因为它被移动才发现）。
+#    若报「Cannot find module」→ 先定位再改这里：
+#      Get-ChildItem "C:\Users\a2695\Desktop\作业\Agent" -Recurse -Filter push-task.mjs
 ```
 
 - ❌ 机器上另有 **Anaconda Python 3.7**（`C:\Users\a2695\anaconda3\python.exe`）—— **绝对禁止使用**
@@ -76,6 +79,7 @@ $K = "C:\Users\a2695\Desktop\作业\Agent\_kit_inspect\agent-project-kit\push-ta
 | ID | 任务 | 依赖 | 档位 | 状态 |
 |---|---|---|---|---|
 | T-011 | 补齐 TASK_BRIEF 并修掉治理矛盾 | — | L1 / T1 | **完成** |
+| T-017 | 修正治理脚本路径（`$K` 已失效） | — | L0 / T2 | **完成** |
 
 ## 2.6 里程碑 M4 · 缺陷修复（可与其他卡并行）
 
@@ -939,6 +943,52 @@ Step 0 诊断 —— 原始输出：<粘贴 5 题的两栏命中情况>
 
 ---
 
+## T-017 · 修正治理脚本路径（`$K` 已失效）
+
+| | |
+|---|---|
+| **难度 / 档位** | L0 / T2 |
+| **依赖** | — |
+| **inScope** | `docs/PLAN.md`、`docs/BOARD.md` |
+| **outOfScope** | `AGENTS.md`、`SPEC.md`、`src/**`、`eval/**`、`data/**` |
+
+**问题**：`§0.2` 里 `$K = "...\_kit_inspect\agent-project-kit\push-task.mjs"` **已指向不存在的路径** —— 工作区整理时 `agent-project-kit/` 被移到了**工作区根目录**。
+后果：下一个会话照 `§3` 步骤 6 抄命令会直接 `MODULE_NOT_FOUND`，**推不上去**（T-016 提交时就撞上了，临时改用新路径才推成功）。
+
+**修复**：把 `$K` 更新为新位置，并补一条「先确认存在 / 找不到时怎么定位」的提示。
+后者比前者更重要 —— `$K` 是**仓库外的本机路径**，会随工作区整理反复失效；写死一次不等于以后都对。
+
+**验收（自证型：本卡的提交本身就是验收证据）**
+
+```powershell
+# 1) 路径存在
+Test-Path "C:\Users\a2695\Desktop\作业\Agent\agent-project-kit\push-task.mjs"
+
+# 2) 用 §3 步骤 6 的命令真的跑一次闭环
+#    —— 若 $K 写错，这条会以 MODULE_NOT_FOUND 失败；成功即证明修复有效
+& "C:\Program Files\nodejs\node.exe" $K "$R" -m "chore(governance): 修正治理脚本路径 $K（T-017）"
+```
+
+**通过标准**
+- 第 1 条为 `True`
+- 第 2 条真的完成「提交 → 推分支 → **快进合并 main** → 推 main」
+- `AGENTS.md` **不需要改**：已用 `grep` 确认它**零命中** `push-task`（它从不引用这个脚本）
+- `SPEC.md`、`src/**`、`eval/**`、`data/**` 一字未动
+
+**结论模板**
+
+```
+任务：T-017 修正治理脚本路径
+改动文件：docs/PLAN.md、docs/BOARD.md
+验收结果：
+  [x] Test-Path $K —— 实际：True
+  [x] 用 $K 跑通闭环 —— 实际：<提交 hash + 已推送 main>
+  [x] grep 确认 AGENTS.md 无需改 —— 实际：push-task 命中 0
+遗留问题：<路径仍可能再变；已在 §0.2 写明如何定位>
+```
+
+---
+
 ## 3. 单卡执行循环
 
 ```
@@ -1012,3 +1062,4 @@ Step 0 诊断 —— 原始输出：<粘贴 5 题的两栏命中情况>
 | 2026-09-18 | T-014 修掉 `/chat` 的 `latency_ms` 口径；**全项目 14 / 14 闭环** | 该字段只覆盖生成段：mock 报 0 / 客户端 460 ms、真实报 1251 / 客户端 8217 ms，「接口延迟」名不符实；改为请求作用域计时后，比值从 **0.15 回到 1.00** |
 | 2026-09-18 | 新增 T-015（缓存检索索引，M5 性能优化）并**修正其验收标准第 1 条** | 实测发现每次检索都重建 BM25 索引（占检索耗时 99%）；而初版验收写的"跨进程黄金基线逐字 diff"被证明**天生不可达**——未改动的原版代码同样对不上（10/6 处差异），差异全在 vector 层。改为**同进程 A/B**（两条路径共享同一 chroma 状态，差异只可能来自缓存），在相关维度上更严格 |
 | 2026-09-18 | 新增 T-016（multi-hop 检索侧对照实验），**以负结果收尾**，并新建 `docs/EXPERIMENTS.md` | 外部建议"先修 multi-hop（父子分块或调 top_k_final）"，但项目此前**没有做对照的能力与习惯**。实验证明：候选从 4 扩到 8 后 `multi_hop` 一分未动，而融合池本来就 5/5 覆盖全部依据 → **瓶颈在生成侧**，检索侧改动无效。同时发现 `hit_at_k` 对 k 单调、不能跨 k 比较质量 |
+| 2026-09-18 | 新增 T-017（修正 `$K` 路径） | 工作区整理把 `agent-project-kit/` 移到了根目录，`§0.2` 的 `$K` 变成死路径，T-016 提交时实际撞到 `MODULE_NOT_FOUND`。已在 §0.2 补「找不到时怎么定位」——因为它是**仓库外的本机路径**，会反复失效 |
